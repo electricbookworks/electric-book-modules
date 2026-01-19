@@ -1,10 +1,5 @@
 import { ebSlugify } from './utilities'
 
-// Load the ebIndexTargets 'database'.
-// Check if the file exists using the book index files data from webpack
-const bookIndexFileExists = process.env.bookIndexFiles && process.env.bookIndexFiles.includes(process.env.output)
-const ebIndexTargets = bookIndexFileExists && Array.isArray(require(`./book-index-${process.env.output}.js`)) ? require(`./book-index-${process.env.output}.js`) : []
-
 // Check the page for reference indexes.
 // If we find any, look up each list item
 // in the book-index-*.js, and add a link.
@@ -33,7 +28,7 @@ function ebIndexAddLink (listItem, pageReferenceSequenceNumber, entry) {
 }
 
 // Look up an entry's anchor targets to link to
-function ebIndexFindLinks (listItem) {
+function ebIndexFindLinks (listItem, ebIndexTargets) {
   // We're already looping through all `li`s`, even descendants.
   // For each one, contruct its tree from its parent nodes.
   // When we look up this entry in the db, we'll compare
@@ -137,7 +132,7 @@ function ebIndexFindLinks (listItem) {
 }
 
 // Get all the indexes on the page, and start processing them.
-export default function ebIndexLists () {
+export default function ebIndexLists (ebIndexTargets) {
   // Don't do this if the list links are already loaded.
   // This prevents us doing this work if the page has been
   // pre-processed. E.g. by gulp during PDF or epub output.
@@ -152,7 +147,7 @@ export default function ebIndexLists () {
     const listItems = indexList.querySelectorAll('li')
 
     listItems.forEach(function (listItem) {
-      ebIndexFindLinks(listItem)
+      ebIndexFindLinks(listItem, ebIndexTargets)
     })
 
     // Flag when we're done
