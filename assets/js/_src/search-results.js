@@ -3,12 +3,6 @@ import { locales, pageLanguage } from './locales'
 import { index } from './search-index'
 import { fillSearchBox, searchTerm } from './search-terms'
 
-const store = process.env.config.collections?.docs?.output === true
-  ? (Array.isArray(require(`./search-index-with-docs-${process.env.output}.js`)) ? require(`./search-index-with-docs-${process.env.output}.js`) : [])
-  : (Array.isArray(require(`./search-index-${process.env.output}.js`)) ? require(`./search-index-${process.env.output}.js`) : [])
-
-store.forEach(doc => index.addDoc(doc))
-
 let ebSearchIndexLoading = null
 
 // Get current variant
@@ -118,7 +112,7 @@ function displaySearchResults (results, store) {
   searchForm.parentNode.innerHTML += appendString
 }
 
-function checkForSearchTerm () {
+function checkForSearchTerm (store) {
   if (searchTerm) {
     // perform the search
     const results = index.search(searchTerm, {
@@ -130,14 +124,13 @@ function checkForSearchTerm () {
   }
 }
 
-function ebSearchIndexLoadingCheck () {
-  if (store && store.length > 0) {
-    checkForSearchTerm()
-    window.clearInterval(ebSearchIndexLoading)
-  }
-}
-
-export default function ebSearchResults () {
-  ebSearchIndexLoading = window.setInterval(ebSearchIndexLoadingCheck, 100)
+export default function ebSearchResults (store) {
+  ebSearchIndexLoading = window.setInterval(function () {
+    if (store && store.length > 0) {
+      store.forEach(doc => index.addDoc(doc))
+      checkForSearchTerm(store)
+      window.clearInterval(ebSearchIndexLoading)
+    }
+  }, 100)
   fillSearchBox()
 }
