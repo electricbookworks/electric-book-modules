@@ -5,9 +5,9 @@ const { imageSettings } = require('./paths.js')
 const { book } = require('./args.js')
 
 // Load utilities from elsewhere in this repo
-const { ebSlugify } = require('@electricbookworks/electric-book-modules/assets/js/_src/utilities.js')
+const { ebSlugify } = require('../../../assets/js/utilities.js')
 if (!ebSlugify) {
-  console.log('Could not load ebSlugify from @electricbookworks/electric-book-modules/assets/js/_src/utilities.js')
+  console.log('Could not load ebSlugify from utilities.js')
 }
 
 // Function for checking if an image should be processed
