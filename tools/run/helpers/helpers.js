@@ -279,7 +279,8 @@ async function webpack (argv) {
     }
 
     // Create an array of arguments to pass to spawn()
-    const webpackSpawnArgs = ['--config', 'webpack/webpack.config.js', '--mode=production']
+    const webpackConfig = require.resolve('webpack/webpack.config.js')
+    const webpackSpawnArgs = ['--config', webpackConfig, '--mode=production']
 
     if (argv.debugjs) {
       webpackSpawnArgs.push('--watch')
