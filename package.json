@@ -1,11 +1,11 @@
 {
   "name": "@electricbookworks/electric-book-modules",
   "version": "1.0.18",
-  "description": "A distributable package of modules used in the Electric Book Template and derivations thereof.",
+  "description": "A distributable repository of modules used in the Electric Book Template and derivations thereof.",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "first-release": "npx standard-version --first-release  && git push --follow-tags && npm publish",
-    "release": "standard-version && git push --follow-tags && npm publish",
+    "first-release": "npx standard-version --first-release  && git push --follow-tags",
+    "release": "standard-version && git push --follow-tags",
     "watch": "nodemon --exec \"yalc push\""
   },
   "repository": {
