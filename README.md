@@ -20,7 +20,27 @@ To update to a new minor or major verion, first change the version in the packag
 npm run first-release
 ```
 
-To get this release inside an Electric Book Template, update the version number in the relevant template's `package.json` file and install it: `npm install`.
+### Installing in your Electric Book Template
+
+Add it as a dependency using the direct GitHub repo and tag version approach, replacing `{tag}` with the version:
+
+```js
+"dependencies": {
+  "@electricbookworks/electric-book-modules": "github:electricbookworks/electric-book-modules#{tag}"
+}
+```
+
+Then install it: `npm install`.
+
+### Updating to a new version
+
+This dependency approach can result in `npm install` not correctly updating the package when changing the version. To fix this, use the following inside your Electric Book Template after changing the version:
+
+```sh
+rm -rf node_modules/@electricbookworks/electric-book-modules && rm package-lock.json && npm install
+```
+
+Your template should also have shortcut command for this: `npm run update-modules`.
 
 # Using [yalc](https://github.com/wclr/yalc) for local development
 
