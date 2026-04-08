@@ -7,7 +7,10 @@ const htmlFilePaths = require('../paths/htmlFilePaths.js')
 const variantSettings = require('../settings/variantSettings.js')
 
 // Run Prince
-async function runPrince (argv) {
+// options (optional): { onStdout, maxPasses }
+async function runPrince (argv, options) {
+  options = options || {}
+
   // Check if we're using the correct Prince version
   await checkPrinceVersion()
 
@@ -96,7 +99,7 @@ async function runPrince (argv) {
       // because they are new and not necessarily
       // supported by the installed version
       // of node-prince.
-      .option('max-passes', 3, true)
+      .option('max-passes', options.maxPasses || 3, true)
       .option('fail-dropped-content', true, true)
 
     // The following options are very strict,
@@ -121,7 +124,13 @@ async function runPrince (argv) {
           process.exit(1)
         }
       })
-      .on('stdout', function (line) { console.log(line) })
+      .on('stdout', function (line) {
+        if (options.onStdout) {
+          options.onStdout(line)
+        } else {
+          console.log(line)
+        }
+      })
       .execute()
       .then(function () {
         resolve()

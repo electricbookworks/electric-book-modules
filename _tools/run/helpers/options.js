@@ -187,6 +187,13 @@ const options = {
     default: '_site',
     defaultDescription: '_site',
     type: 'string'
+  },
+  'dry-run': {
+    description: 'Report issues without modifying files (for refine)',
+    alias: 'dry',
+    default: false,
+    defaultDescription: 'false',
+    type: 'boolean'
   }
 }
 

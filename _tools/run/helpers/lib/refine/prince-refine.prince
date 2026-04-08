@@ -1,0 +1,352 @@
+// Prince-side script for detecting and fixing widows, orphans, and short lines.
+// This script runs inside Prince's JavaScript environment during PDF rendering.
+//
+// It uses registerPostLayoutFunc to inspect the layout after each pass,
+// detect issues, add tighten/loosen classes to the DOM, and trigger
+// re-layout. It logs a structured manifest of every change so that
+// the Node.js orchestrator can apply the same changes to the markdown.
+//
+// Severity scoring (from electricbookworks/electric-book#162):
+//   0 = no issues
+//   1 = short-line (paragraph ends with <= 5 characters)
+//   2 = widow on a left-hand (verso) page
+//   3 = widow on a right-hand (recto) page
+//   4 = wide orphan (> half measure) on recto
+//   5 = wide orphan (> half measure) on verso
+//   6 = narrow orphan (<= half measure) on recto
+//   7 = narrow orphan (<= half measure) on verso
+
+Prince.trackBoxes = true
+
+// Maximum tighten/loosen value we'll ever apply.
+// Values above 10/1000 em are generally noticeable to readers.
+var MAX_TIGHTEN = 10
+
+// Track how many passes we've done and what we've changed
+var refinePass = 0
+var changesThisPass = 0
+var allChanges = []
+
+// Is this a recto (right-hand, odd-numbered) page?
+function isRecto (pageNum) {
+  return pageNum % 2 === 1
+}
+
+// --- Fingerprinting (replicates setup.js logic for Prince) ---
+
+// Slugify: strip special characters, lowercase, collapse spaces to hyphens.
+// Simplified version of ebSlugify for Prince's ES5 environment.
+function slugify (str) {
+  var special = "ÃÀÁÄÂÈÉËÊÌÍÏÎÒÓÖÔÙÚÜÛãàáäâèéëêìíïîòóöôùúüûÑñÇç'{}´-+¿?.,;:[]*¨¡!=()&%$#/\"_"
+  var result = ''
+  for (var i = 0; i < str.length; i++) {
+    var c = str.charAt(i)
+    if (special.indexOf(c) >= 0) {
+      result += ' '
+    } else {
+      result += c
+    }
+  }
+  return result.trim().replace(/[^A-Za-z0-9-]+/g, '-').toLowerCase()
+}
+
+// Get the index of an element among its parent's children (1-based).
+function getSiblingIndex (element) {
+  var parent = element.parentNode
+  if (!parent) return 1
+  var children = parent.children || parent.childNodes
+  for (var i = 0; i < children.length; i++) {
+    if (children[i] === element) return i + 1
+  }
+  return 1
+}
+
+// Compute a fingerprint for a given element, matching setup.js format:
+// ANCESTOR_TAG-INDEX-ELEMENT_TAG-INDEX-openingslug-closingslug
+function computeFingerprint (element) {
+  // Get ancestor info (immediate parent)
+  var parent = element.parentNode
+  var ancestorPart = ''
+  if (parent && parent.tagName) {
+    ancestorPart = parent.tagName + '-' + getSiblingIndex(parent) + '-'
+  }
+
+  // Element's own tag and sibling index
+  var elementPart = element.tagName + '-' + getSiblingIndex(element) + '-'
+
+  // Opening and closing text slugs
+  var text = element.textContent || ''
+  var opening = slugify(text.substring(0, 20)).replace(/-/g, '')
+  var closing = slugify(text.substring(text.length - 20)).replace(/-/g, '')
+
+  return ancestorPart + elementPart + opening + '-' + closing
+}
+
+// Walk the box tree depth-first, calling fn(box) on each box.
+function walkBoxes (box, fn) {
+  fn(box)
+  if (box.children) {
+    for (var i = 0; i < box.children.length; i++) {
+      walkBoxes(box.children[i], fn)
+    }
+  }
+}
+
+// Get all boxes for a given element, grouped by page.
+// Returns an object: { pageNum: { lineCount, height, boxes: [] } }
+function getElementPageInfo (element) {
+  var boxes = element.getPrinceBoxes()
+  var pages = {}
+  for (var i = 0; i < boxes.length; i++) {
+    var box = boxes[i]
+    var pn = box.pageNum
+    if (!pages[pn]) {
+      pages[pn] = { lineCount: 0, height: 0, boxes: [] }
+    }
+    pages[pn].boxes.push(box)
+    pages[pn].height += box.h
+  }
+
+  // Count lines by walking each box's children for LINE types
+  for (var i = 0; i < boxes.length; i++) {
+    var box = boxes[i]
+    var pn = box.pageNum
+    if (box.type === 'LINE') {
+      pages[pn].lineCount++
+    }
+    // Also walk children for LINE boxes
+    if (box.children) {
+      for (var j = 0; j < box.children.length; j++) {
+        if (box.children[j].type === 'LINE') {
+          pages[pn].lineCount++
+        }
+      }
+    }
+  }
+
+  return pages
+}
+
+// Count LINE boxes in a box tree (recursive).
+function countLines (box) {
+  var count = 0
+  if (box.type === 'LINE') count++
+  if (box.children) {
+    for (var i = 0; i < box.children.length; i++) {
+      count += countLines(box.children[i])
+    }
+  }
+  return count
+}
+
+// Get the width of the last LINE box in a box tree.
+function getLastLineWidth (box) {
+  var lastLine = null
+  function findLines (b) {
+    if (b.type === 'LINE') lastLine = b
+    if (b.children) {
+      for (var i = 0; i < b.children.length; i++) {
+        findLines(b.children[i])
+      }
+    }
+  }
+  findLines(box)
+  return lastLine ? lastLine.w : 0
+}
+
+// Estimate a conservative tighten value based on line count.
+function estimateTighten (lineCount) {
+  if (lineCount <= 4) return Math.min(8, MAX_TIGHTEN)
+  if (lineCount <= 8) return Math.min(5, MAX_TIGHTEN)
+  if (lineCount <= 15) return Math.min(3, MAX_TIGHTEN)
+  return 2
+}
+
+// Check if an element already has a tighten or loosen class.
+function hasTrackingClass (element) {
+  var cls = element.className || ''
+  return cls.match(/\b(tighten|loosen)-\d+/)
+}
+
+// Add a class to an element and record the change.
+function addClass (element, className, reason, pageNum, severity) {
+  if (hasTrackingClass(element)) return false
+
+  var existingClass = element.className || ''
+  element.className = existingClass ? existingClass + ' ' + className : className
+
+  changesThisPass++
+  var fp = computeFingerprint(element)
+  var change = {
+    className: className,
+    reason: reason,
+    severity: severity,
+    pageNum: pageNum,
+    recto: isRecto(pageNum),
+    elementTag: element.tagName,
+    elementId: element.id || '',
+    fingerprint: fp,
+    textPreview: (element.textContent || '').substring(0, 80).replace(/\n/g, ' ')
+  }
+  allChanges.push(change)
+
+  return true
+}
+
+// Main detection function, called after each layout pass.
+function detectAndFix () {
+  refinePass++
+  changesThisPass = 0
+
+  var pages = PDF.pages
+  if (!pages || pages.length === 0) return
+
+  // Walk each page's box tree to find paragraph elements
+  // that span page boundaries or have issues.
+  var allParagraphs = document.querySelectorAll('p, li')
+
+  for (var i = 0; i < allParagraphs.length; i++) {
+    var el = allParagraphs[i]
+
+    // Skip elements that already have tracking classes
+    if (hasTrackingClass(el)) continue
+
+    var boxes = el.getPrinceBoxes()
+    if (!boxes || boxes.length === 0) continue
+
+    // Group boxes by page
+    var byPage = {}
+    var pageNums = []
+    for (var b = 0; b < boxes.length; b++) {
+      var pn = boxes[b].pageNum
+      if (!byPage[pn]) {
+        byPage[pn] = []
+        pageNums.push(pn)
+      }
+      byPage[pn].push(boxes[b])
+    }
+    pageNums.sort(function (a, b) { return a - b })
+
+    // Count total lines across all pages for this element
+    var totalLines = 0
+    for (var b = 0; b < boxes.length; b++) {
+      totalLines += countLines(boxes[b])
+    }
+
+    // Skip elements with very few lines
+    if (totalLines < 3) continue
+
+    // --- Widow detection ---
+    // A paragraph split across pages where the FIRST page
+    // has only 1 line (paragraph barely started before break).
+    if (pageNums.length > 1) {
+      var firstPageBoxes = byPage[pageNums[0]]
+      var firstPageLines = 0
+      for (var b = 0; b < firstPageBoxes.length; b++) {
+        firstPageLines += countLines(firstPageBoxes[b])
+      }
+
+      if (firstPageLines === 1) {
+        var pn = pageNums[0]
+        var severity = isRecto(pn) ? 3 : 2
+        var tighten = estimateTighten(totalLines)
+        addClass(el, 'tighten-' + tighten, 'widow', pn, severity)
+        continue
+      }
+    }
+
+    // --- Orphan detection ---
+    // A paragraph split across pages where the LAST page
+    // has only 1 line (paragraph barely ends on the new page).
+    if (pageNums.length > 1) {
+      var lastPage = pageNums[pageNums.length - 1]
+      var lastPageBoxes = byPage[lastPage]
+      var lastPageLines = 0
+      for (var b = 0; b < lastPageBoxes.length; b++) {
+        lastPageLines += countLines(lastPageBoxes[b])
+      }
+
+      if (lastPageLines === 1) {
+        // Is the orphan line wide or narrow?
+        var lastLineW = 0
+        for (var b = 0; b < lastPageBoxes.length; b++) {
+          var w = getLastLineWidth(lastPageBoxes[b])
+          if (w > lastLineW) lastLineW = w
+        }
+
+        // Get the page body width for comparison
+        var pageBody = PDF.pages[lastPage - 1]
+        var measure = pageBody ? pageBody.w : 500
+        var isWide = lastLineW > measure * 0.5
+
+        var severity
+        if (isWide) {
+          severity = isRecto(lastPage) ? 4 : 5
+        } else {
+          severity = isRecto(lastPage) ? 6 : 7
+        }
+
+        var tighten = estimateTighten(totalLines)
+        addClass(el, 'tighten-' + tighten, 'orphan', lastPage, severity)
+        continue
+      }
+    }
+
+    // --- Short-line detection ---
+    // Last line of a paragraph has very few characters.
+    // Only check paragraphs that aren't split across pages.
+    if (pageNums.length === 1) {
+      var lastLineWidth = getLastLineWidth(boxes[0])
+      var pageBody = PDF.pages[pageNums[0] - 1]
+      var measure = pageBody ? pageBody.w : 500
+
+      // A short line: less than 10% of the measure
+      // (roughly corresponds to <= 5-6 characters)
+      if (lastLineWidth > 0 && lastLineWidth < measure * 0.1 && totalLines >= 3) {
+        var tighten = estimateTighten(totalLines)
+        addClass(el, 'tighten-' + tighten, 'short-line', pageNums[0], 1)
+      }
+    }
+  }
+
+  // If we made changes, log them and register for another pass.
+  // If no changes, we're done.
+  if (changesThisPass > 0) {
+    console.log('REFINE_PASS:' + refinePass + ':CHANGES:' + changesThisPass)
+    Prince.registerPostLayoutFunc(detectAndFix)
+  }
+}
+
+// After final layout, log the complete manifest.
+Prince.addEventListener('complete', function () {
+  if (allChanges.length === 0) {
+    console.log('REFINE_MANIFEST_START')
+    console.log('REFINE_MANIFEST_END')
+    console.log('REFINE_SUMMARY:passes=' + refinePass + ',changes=0')
+    return
+  }
+
+  console.log('REFINE_MANIFEST_START')
+  for (var i = 0; i < allChanges.length; i++) {
+    var c = allChanges[i]
+    // Output as a parseable line:
+    // REFINE_CHANGE|className|reason|severity|pageNum|recto|tag|id|fingerprint|textPreview
+    console.log(
+      'REFINE_CHANGE|' +
+      c.className + '|' +
+      c.reason + '|' +
+      c.severity + '|' +
+      c.pageNum + '|' +
+      c.recto + '|' +
+      c.elementTag + '|' +
+      c.elementId + '|' +
+      c.fingerprint + '|' +
+      c.textPreview
+    )
+  }
+  console.log('REFINE_MANIFEST_END')
+  console.log('REFINE_SUMMARY:passes=' + refinePass + ',changes=' + allChanges.length)
+}, false)
+
+// Register the first post-layout detection pass.
+Prince.registerPostLayoutFunc(detectAndFix)
