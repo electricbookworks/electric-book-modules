@@ -108,7 +108,9 @@ async function refinePrince (argv) {
 
   // 2. Inject the refine script
   console.log('Injecting refine script into merged HTML...')
-  injectRefineScript(mergedPath)
+  injectRefineScript(mergedPath, {
+    maxShift: typeof argv['max-shift'] === 'number' ? argv['max-shift'] : 2
+  })
 
   // 3. Run Prince using the same pipeline as `eb output`,
   //    with extra passes for refinement and a stdout callback
@@ -251,6 +253,14 @@ async function refinePrince (argv) {
   }
 
   reportIssues(issues)
+
+  if (argv.highlight) {
+    console.log('\nHighlight colours in the PDF:')
+    console.log('  Blue:   tightened paragraphs')
+    console.log('  Orange: loosened paragraphs')
+    console.log('  Green:  added space (lone-line-bottom or lone-line-top fix)')
+    console.log('  Pink:   unfixed issues')
+  }
 
   if (mapped.length > 0) {
     console.log(

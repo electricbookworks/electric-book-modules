@@ -39,6 +39,27 @@ var allChanges = []
 var lastFixInfo = null
 var skippedElements = []
 
+// Fixes applied during the most recent detection pass BEYOND the single
+// fix tracked by lastFixInfo. Because several wrapper chains may each
+// receive a fix in one pass, only the first becomes lastFixInfo; the rest
+// would otherwise reach the final PDF unverified until the end-of-run
+// sweep, which can miss a fix whose relocated blemish a later fix has
+// already masked. We regression-check every entry at the start of the
+// next pass and undo any whose fix raised severity (it resolved its own
+// issue but turned the same paragraph into a same-or-worse lone-line issue
+// of the other kind). Each entry is a fixInfo object: { issueElement,
+// issueType, fixElement, pageNum, severity, ... }.
+var pendingFixes = []
+
+// Snapshot of the lone-line issues present in each wrapper chain at the
+// start of the CURRENT pass — i.e. before any fix applied this pass has
+// taken effect. detectAndFix rebuilds this each pass and addClass copies
+// the reference onto every change it records, so the end-of-run
+// verification sweep can tell which lone-line issues a fix introduced in
+// its chain (present in the settled layout but absent from this
+// pre-fix baseline). Shape: { chainId: { fingerprint: severity } }.
+var passChainBaseline = null
+
 // Guard against infinite post-sweep loops. Set to true when we
 // resume fixing after a sweep; reset when a fix is applied so
 // another sweep + resume cycle can occur.
@@ -52,6 +73,19 @@ var catalogue = null
 
 // Whether the final verification sweep has been done.
 var sweepDone = false
+
+// Pre-IAL baselines for letter-spacing fixes, keyed by fingerprint.
+// Captured the first time a tighten/loosen class is applied to an
+// element: its natural line count and measure, before the class takes
+// effect. Once the verification sweep has settled we re-measure each
+// such element; if BOTH its line count and its measure are unchanged,
+// the class made no difference and is pruned. The measure must match
+// too, because line count at fixed text is a function of the measure:
+// a paragraph whose measure changed (e.g. it reflowed around a floated
+// sidebar) could have an unchanged line count by coincidence, and
+// removing its IAL might then shift a line — so a measure change
+// blocks the prune.
+var lsBaselines = {}
 
 // Word-spacing issues found on the first pass.
 // Lines with wide inter-word gaps that suggest
@@ -198,6 +232,23 @@ function getLastLineWidth (box) {
   return lastLine ? lastLine.w : 0
 }
 
+// Measure an element's current line count and measure (its widest
+// block-box width) from its live boxes. Used to capture a pre-IAL
+// baseline and, once the sweep has settled, to test whether a
+// letter-spacing IAL is inert — i.e. left the line count unchanged at
+// an unchanged measure — and can therefore be pruned safely.
+function measureElement (el) {
+  var boxes = el.getPrinceBoxes()
+  if (!boxes || boxes.length === 0) return null
+  var lines = 0
+  var measure = 0
+  for (var i = 0; i < boxes.length; i++) {
+    lines += countLines(boxes[i])
+    if (boxes[i].w > measure) measure = boxes[i].w
+  }
+  return { lines: lines, measure: measure }
+}
+
 // Collect all LINE boxes from a box tree into the result array.
 function collectLineBoxes (box, result) {
   if (box.type === 'LINE') result.push(box)
@@ -224,7 +275,16 @@ function collectBoxText (box) {
 // Preferred tighten value: aggressive enough to work on most
 // paragraphs, but visually acceptable. We start here and only
 // go to MAX_TIGHTEN if this doesn't resolve the issue.
-var PREFERRED_TIGHTEN = 8
+var PREFERRED_TIGHTEN = 10
+
+// Maximum whole-line vertical shift (add-N / save-N) we'll apply
+// to a chapter opener. Shifting more than a couple of lines at a
+// chapter opening is a large, visible change, so we cap escalation.
+// Defaults to 2 but can be overridden by the orchestrator, which
+// injects REFINE_MAX_SHIFT_LINES ahead of this script.
+var MAX_SHIFT_LINES = (typeof REFINE_MAX_SHIFT_LINES !== 'undefined')
+  ? REFINE_MAX_SHIFT_LINES
+  : 2
 
 // Return the preferred starting tighten value.
 // All paragraphs start at PREFERRED_TIGHTEN; on failure we
@@ -241,9 +301,17 @@ function estimateLoosen (lineCount) {
 }
 
 // Build a catalogue of all issues and fragile elements from
-// the initial layout. A "fragile" element is one with exactly
-// 2 lines on its first or last page — one line of shift would
-// create a new lone-line issue.
+// the initial layout. Each fragile is tagged with a "kind" that
+// describes how it can be disturbed:
+//   - 'ial-fragile': two lines on its last page (ends within two
+//     lines of the top of a page). Tightening past it can strand
+//     its last line as a high-severity lone-line-top.
+//   - 'loosen-fragile': two lines on its first page. Loosening
+//     upstream can push a line over as a lone-line-bottom.
+//   - 'backward-fragile': starts at the top of a page. Only at risk
+//     from line-saving on PRECEDING pages, which could pull its
+//     first line back a page as a low-severity lone-line-bottom; it
+//     is safe to receive an IAL itself (candidateEligible = true).
 //
 // For each fragile, we also check whether there's a plausible
 // fix candidate nearby (a paragraph that could be tightened to
@@ -260,75 +328,113 @@ function buildCatalogue (paragraphInfos) {
     var el = info.element
     var totalLines = info.totalLines
     if (totalLines < 2) continue
-    if (info.pageNums.length <= 1) continue
 
-    // --- Check first page for issues and fragiles ---
-    var firstPageBoxes = info.byPage[info.pageNums[0]]
+    var multiPage = info.pageNums.length > 1
+
+    // Count lines on the first and last pages (only meaningful when
+    // the paragraph spans a page break).
     var firstPageLines = 0
-    for (var b = 0; b < firstPageBoxes.length; b++) {
-      firstPageLines += countLines(firstPageBoxes[b])
-    }
-
-    if (firstPageLines === 1) {
-      // Current issue: lone-line-bottom
-      var pn = info.firstPage
-      cat.issues.push({
-        index: i, element: el, page: pn,
-        type: 'lone-line-bottom',
-        severity: isRecto(pn) ? 3 : 2,
-        wrapperChain: info.wrapperChain
-      })
-    } else if (firstPageLines === 2) {
-      // Fragile: content shifting DOWN (from loosen) could
-      // push one line to the next page → lone-line-bottom
-      var pn = info.firstPage
-      cat.fragiles.push({
-        index: i, element: el, page: pn,
-        potentialType: 'lone-line-bottom',
-        potentialSeverity: isRecto(pn) ? 3 : 2,
-        trigger: 'loosen',
-        hasCandidate: false,
-        wrapperChain: info.wrapperChain
-      })
-    }
-
-    // --- Check last page for issues and fragiles ---
-    var lastPage = info.lastPage
-    var lastPageBoxes = info.byPage[lastPage]
     var lastPageLines = 0
-    for (var b = 0; b < lastPageBoxes.length; b++) {
-      lastPageLines += countLines(lastPageBoxes[b])
+    if (multiPage) {
+      var firstPageBoxes = info.byPage[info.pageNums[0]]
+      for (var b = 0; b < firstPageBoxes.length; b++) {
+        firstPageLines += countLines(firstPageBoxes[b])
+      }
+      var lastPageBoxes = info.byPage[info.lastPage]
+      for (var b2 = 0; b2 < lastPageBoxes.length; b2++) {
+        lastPageLines += countLines(lastPageBoxes[b2])
+      }
     }
 
-    if (lastPageLines === 1) {
-      // Current issue: lone-line-top
-      var isWide = info.lastLineWidth > info.measure * 0.5
-      var sev
-      if (isWide) {
-        sev = isRecto(lastPage) ? 4 : 5
-      } else {
-        sev = isRecto(lastPage) ? 6 : 7
+    // A paragraph carrying one or two lines onto its last page ends
+    // within two lines of the top of that page. With two lines it is
+    // 'ial-fragile': fragile to an IAL applied to itself (tightening
+    // can strand its last line as a lone-line-top). One line is the
+    // live lone-line-top issue, catalogued below.
+    var endsNearPageTop = multiPage && lastPageLines >= 1 && lastPageLines <= 2
+
+    // --- Multi-page issue and fragile detection ---
+    if (multiPage) {
+      // First page: a single line is a lone-line-bottom issue; two
+      // lines is 'loosen-fragile' (loosening upstream shifts content
+      // down, pushing one line over → lone-line-bottom).
+      if (firstPageLines === 1) {
+        var pnf = info.firstPage
+        cat.issues.push({
+          index: i, element: el, page: pnf,
+          type: 'lone-line-bottom',
+          severity: isRecto(pnf) ? 3 : 2,
+          wrapperChain: info.wrapperChain
+        })
+      } else if (firstPageLines === 2) {
+        var pnl = info.firstPage
+        cat.fragiles.push({
+          index: i, element: el, page: pnl,
+          potentialType: 'lone-line-bottom',
+          potentialSeverity: isRecto(pnl) ? 3 : 2,
+          trigger: 'loosen',
+          kind: 'loosen-fragile',
+          candidateEligible: true,
+          hasCandidate: false,
+          wrapperChain: info.wrapperChain
+        })
       }
-      cat.issues.push({
-        index: i, element: el, page: lastPage,
-        type: 'lone-line-top', severity: sev,
-        wrapperChain: info.wrapperChain
-      })
-    } else if (lastPageLines === 2) {
-      // Fragile: content shifting UP (from tighten) could pull
-      // one line back to the previous page → lone-line-top
-      var isWide = info.lastLineWidth > info.measure * 0.5
-      var sev
-      if (isWide) {
-        sev = isRecto(lastPage) ? 4 : 5
-      } else {
-        sev = isRecto(lastPage) ? 6 : 7
+
+      // Last page: a single line is a lone-line-top issue; two lines
+      // is 'ial-fragile' (tightening upstream shifts content up,
+      // pulling one line back → lone-line-top).
+      var lastPage = info.lastPage
+      if (lastPageLines === 1) {
+        var isWide = info.lastLineWidth > info.measure * 0.5
+        var sev
+        if (isWide) {
+          sev = isRecto(lastPage) ? 4 : 5
+        } else {
+          sev = isRecto(lastPage) ? 6 : 7
+        }
+        cat.issues.push({
+          index: i, element: el, page: lastPage,
+          type: 'lone-line-top', severity: sev,
+          wrapperChain: info.wrapperChain
+        })
+      } else if (lastPageLines === 2) {
+        var isWide2 = info.lastLineWidth > info.measure * 0.5
+        var sev2
+        if (isWide2) {
+          sev2 = isRecto(lastPage) ? 4 : 5
+        } else {
+          sev2 = isRecto(lastPage) ? 6 : 7
+        }
+        cat.fragiles.push({
+          index: i, element: el, page: lastPage,
+          potentialType: 'lone-line-top',
+          potentialSeverity: sev2,
+          trigger: 'tighten',
+          kind: 'ial-fragile',
+          candidateEligible: true,
+          hasCandidate: false,
+          wrapperChain: info.wrapperChain
+        })
       }
+    }
+
+    // --- Backward-fragile classification (page-top starts) ---
+    // A paragraph that starts at the top of a page is only fragile to
+    // line-saving on PRECEDING pages, which could pull its first line
+    // back onto the previous page as a low-severity lone-line-bottom.
+    // It is NOT fragile to an IAL on itself, so it is a safe IAL
+    // candidate. We skip the case where it also ends within two lines
+    // of the next page's top (already 'ial-fragile' above) and the case
+    // where its first page already holds a lone-line-bottom issue.
+    if (info.startsAtPageTop && !endsNearPageTop && firstPageLines !== 1) {
+      var prevPage = info.firstPage - 1
       cat.fragiles.push({
-        index: i, element: el, page: lastPage,
-        potentialType: 'lone-line-top',
-        potentialSeverity: sev,
+        index: i, element: el, page: info.firstPage,
+        potentialType: 'lone-line-bottom',
+        potentialSeverity: isRecto(prevPage) ? 3 : 2,
         trigger: 'tighten',
+        kind: 'backward-fragile',
+        candidateEligible: true,
         hasCandidate: false,
         wrapperChain: info.wrapperChain
       })
@@ -459,9 +565,22 @@ function analyzeWordSpacing (paragraphInfos) {
 // lone-line-top at fragile downstream elements. A loosen adds
 // a line (content shifts DOWN), creating lone-line-bottom risk.
 //
-// We check the NEAREST downstream fragile of the relevant type
-// within a few pages. A single line shift typically creates at
-// most one new issue before being absorbed by paragraph reflow.
+// We scan the downstream same-trigger fragiles within a few pages
+// (a single line shift typically creates at most one new issue
+// before being absorbed by paragraph reflow) and take the one that
+// poses the HIGHEST effective risk — not merely the nearest. This
+// matters because the catalogue mixes fragile kinds of very
+// different severity:
+//   - 'ial-fragile' (two lines on its last page) risks a
+//     high-severity lone-line-top when content is tightened past it;
+//   - 'backward-fragile' (a paragraph that starts at the top of a
+//     page) risks only a low-severity lone-line-bottom, because the
+//     cascade can at most pull its first line back a page.
+// Backward-fragiles are far more numerous and usually nearer, so a
+// nearest-only scan would let a low-risk backward-fragile MASK a
+// farther high-risk ial-fragile. Taking the maximum risk keeps the
+// gate honest while still letting low-severity page-top starts
+// proceed.
 //
 // Returns true if the fix is worth applying, false if the
 // cascade risk outweighs the benefit.
@@ -470,35 +589,46 @@ function analyzeWordSpacing (paragraphInfos) {
 function shouldFix (issuePage, issueSeverity, fixType, issueChain) {
   if (!catalogue) return true
 
-  // Find the nearest fragile triggered by this fix type
-  // within the same wrapper chain
-  var nearestFragile = null
+  // How many pages downstream a single line-shift cascade can
+  // plausibly travel before paragraph reflow absorbs it.
+  var CASCADE_REACH_PAGES = 4
+
+  // Among downstream same-trigger fragiles in this chain within
+  // reach, keep the one posing the highest effective risk.
+  var worstFragile = null
+  var worstRisk = -1
   for (var f = 0; f < catalogue.fragiles.length; f++) {
     var fragile = catalogue.fragiles[f]
     // Only fragiles downstream of the issue page
     if (fragile.page <= issuePage) continue
+    // Only within cascade reach
+    if (fragile.page - issuePage > CASCADE_REACH_PAGES) continue
     // Only fragiles triggered by this fix type
     if (fragile.trigger !== fixType) continue
     // Only fragiles in the same wrapper chain
     if (fragile.wrapperChain !== issueChain) continue
-    nearestFragile = fragile
-    break
+    // Effective risk: fragiles with a fix candidate are lower risk
+    // (the new issue can likely be cleared), discounted by 0.3.
+    var fRisk = fragile.hasCandidate
+      ? fragile.potentialSeverity * 0.3
+      : fragile.potentialSeverity
+    if (fRisk > worstRisk) {
+      worstRisk = fRisk
+      worstFragile = fragile
+    }
   }
 
-  if (!nearestFragile) return true
+  if (!worstFragile) return true
 
-  // Compare 1:1: issue severity vs the fragile's potential severity.
-  // Fragiles with a fix candidate are lower risk (discount by 0.3).
-  var risk = nearestFragile.hasCandidate
-    ? nearestFragile.potentialSeverity * 0.3
-    : nearestFragile.potentialSeverity
+  var risk = worstRisk
 
   if (risk > 0) {
     console.log(
       'REFINE_DEBUG|CASCADE|page=' + issuePage +
       '|severity=' + issueSeverity +
       '|risk=' + Math.round(risk * 10) / 10 +
-      '|fragilePage=' + nearestFragile.page +
+      '|fragilePage=' + worstFragile.page +
+      '|fragileKind=' + (worstFragile.kind || 'n/a') +
       '|fix=' + fixType +
       '|decision=' + (issueSeverity >= risk ? 'PROCEED' : 'SKIP')
     )
@@ -544,27 +674,113 @@ function checkLoneLineTop (el) {
   return linesOnLast === 1
 }
 
-// Remove the tracking class from an element and delete
-// its entries from allChanges. Called when giving up on
-// a fix that did not resolve the target issue.
-function undoFix (el) {
-  var info = getTrackingInfo(el)
-  if (info) {
-    var cls = el.className || ''
-    el.className = cls.replace(info.fullClass, '').replace(/\s{2,}/g, ' ').trim()
+// Current lone-line-bottom severity for an element, measured
+// from its live boxes using the canonical 1–7 scale. Returns 0 if the
+// element has no lone-line-bottom right now. (verso = 2, recto = 3.)
+function loneLineBottomSeverity (el) {
+  var boxes = el.getPrinceBoxes()
+  if (!boxes || boxes.length === 0) return 0
+  var firstPage = Infinity
+  var lastPage = -Infinity
+  for (var i = 0; i < boxes.length; i++) {
+    if (boxes[i].pageNum < firstPage) firstPage = boxes[i].pageNum
+    if (boxes[i].pageNum > lastPage) lastPage = boxes[i].pageNum
   }
+  if (firstPage === lastPage) return 0
+  var linesOnFirst = 0
+  for (var i = 0; i < boxes.length; i++) {
+    if (boxes[i].pageNum === firstPage) linesOnFirst += countLines(boxes[i])
+  }
+  if (linesOnFirst !== 1) return 0
+  return isRecto(firstPage) ? 3 : 2
+}
+
+// Current lone-line-top severity for an element, measured from
+// its live boxes using the canonical 1–7 scale. Returns 0 if the element
+// has no lone-line-top right now. Wide lone-line-tops: recto 4 / verso 5;
+// narrow lone-line-tops: recto 6 / verso 7.
+function loneLineTopSeverity (el) {
+  var boxes = el.getPrinceBoxes()
+  if (!boxes || boxes.length === 0) return 0
+  var firstPage = Infinity
+  var lastPage = -Infinity
+  for (var i = 0; i < boxes.length; i++) {
+    if (boxes[i].pageNum < firstPage) firstPage = boxes[i].pageNum
+    if (boxes[i].pageNum > lastPage) lastPage = boxes[i].pageNum
+  }
+  if (firstPage === lastPage) return 0
+  var linesOnLast = 0
+  var lastPageBoxes = []
+  for (var i = 0; i < boxes.length; i++) {
+    if (boxes[i].pageNum === lastPage) {
+      linesOnLast += countLines(boxes[i])
+      lastPageBoxes.push(boxes[i])
+    }
+  }
+  if (linesOnLast !== 1) return 0
+  // Derive the measure (widest block box) and the lone line's width
+  // to classify it as wide (> half measure) or narrow.
+  var measure = 0
+  for (var i = 0; i < boxes.length; i++) {
+    if (boxes[i].w > measure) measure = boxes[i].w
+  }
+  var lastLineW = 0
+  for (var i = 0; i < lastPageBoxes.length; i++) {
+    var w = getLastLineWidth(lastPageBoxes[i])
+    if (w > lastLineW) lastLineW = w
+  }
+  var isWide = measure > 0 && lastLineW > measure * 0.5
+  if (isWide) return isRecto(lastPage) ? 4 : 5
+  return isRecto(lastPage) ? 6 : 7
+}
+
+// Remove a refinement class from an element and delete its
+// matching entries from allChanges. Called when giving up on a
+// fix that did not resolve the target issue.
+//
+// An element may carry one letter-spacing class (tighten/loosen)
+// AND one vertical-shift class (add/save) at once, so undo is
+// scoped to a single family. Pass family 'ls' (letter-spacing) or
+// 'vs' (vertical-shift) to remove just that one; omit it to remove
+// whichever single refinement class is present (legacy behaviour).
+function undoFix (el, family) {
   var fp = computeFingerprint(el)
-  for (var r = allChanges.length - 1; r >= 0; r--) {
-    if (allChanges[r].fingerprint === fp) {
-      allChanges.splice(r, 1)
+
+  if (family === 'ls' || family === 'vs') {
+    var info = family === 'vs' ? getVerticalShiftInfo(el) : getTrackingInfo(el)
+    if (info) {
+      var cls = el.className || ''
+      el.className = cls.replace(info.fullClass, '').replace(/\s{2,}/g, ' ').trim()
+    }
+    // Remove only this family's change entries (including any
+    // earlier escalation steps) for this element.
+    for (var r = allChanges.length - 1; r >= 0; r--) {
+      if (allChanges[r].fingerprint !== fp) continue
+      var cf = /^(add|save)-/.test(allChanges[r].className) ? 'vs' : 'ls'
+      if (cf === family) allChanges.splice(r, 1)
+    }
+    return
+  }
+
+  // Legacy: strip whichever single refinement class the element
+  // carries and drop all of its change entries.
+  var anyInfo = getTrackingInfo(el) || getVerticalShiftInfo(el)
+  if (anyInfo) {
+    var cls2 = el.className || ''
+    el.className = cls2.replace(anyInfo.fullClass, '').replace(/\s{2,}/g, ' ').trim()
+  }
+  for (var r2 = allChanges.length - 1; r2 >= 0; r2--) {
+    if (allChanges[r2].fingerprint === fp) {
+      allChanges.splice(r2, 1)
     }
   }
 }
 
-// Check if an element already has a tighten or loosen class.
+// Check if an element already has a refinement class — either a
+// tighten/loosen tracking class or a vertical-shift (add/save) class.
 function hasTrackingClass (element) {
   var cls = element.className || ''
-  return cls.match(/\b(tighten|loosen)-\d+/)
+  return cls.match(/\b(tighten|loosen|add|save)-\d+/)
 }
 
 // Extract the current tracking class details from an element.
@@ -576,40 +792,71 @@ function getTrackingInfo (element) {
   return { type: match[1], value: parseInt(match[2], 10), fullClass: match[0] }
 }
 
+// Extract a vertical-shift class (add-N or save-N) from an element.
+// These shift a chapter opener by N whole lines to move content
+// across a page boundary. Returns { type: 'add'|'save', value: N,
+// fullClass } or null.
+function getVerticalShiftInfo (element) {
+  var cls = element.className || ''
+  var match = cls.match(/\b(add|save)-(\d+)/)
+  if (!match) return null
+  return { type: match[1], value: parseInt(match[2], 10), fullClass: match[0] }
+}
+
 // Add a class to an element and record the change.
 // If the element already has a tracking class of the SAME type
 // (tighten or loosen), escalate to the higher value.
 // If it has a tracking class of a DIFFERENT type, skip
 // (don't replace tighten with loosen or vice versa).
 function addClass (element, className, reason, pageNum, severity, issueElement) {
-  var existing = getTrackingInfo(element)
+  // Parse the requested class up front so we can handle both
+  // letter-spacing (tighten/loosen) and vertical-shift (add/save).
+  var reqMatch = className.match(/^(tighten|loosen|add|save)-(\d+)$/)
+  if (!reqMatch) return false
+  var reqType = reqMatch[1]
+  var reqValue = parseInt(reqMatch[2], 10)
+  var isShift = (reqType === 'add' || reqType === 'save')
+
+  // A letter-spacing class (tighten/loosen) and a vertical-shift
+  // class (add/save) operate independently — one adjusts tracking
+  // within the lines, the other moves the whole element by whole
+  // lines — so they may usefully coexist on the same element. We
+  // only ever escalate within the same family, looked up below.
+  var existing = isShift ? getVerticalShiftInfo(element) : getTrackingInfo(element)
+  var cap = isShift ? MAX_SHIFT_LINES : MAX_TIGHTEN
 
   if (existing) {
-    // Parse the requested class
-    var reqMatch = className.match(/^(tighten|loosen)-(\d+)$/)
-    if (!reqMatch) return false
-    var reqType = reqMatch[1]
-    var reqValue = parseInt(reqMatch[2], 10)
-
-    // Don't switch between tighten and loosen
+    // Don't switch direction/type (tighten<->loosen or add<->save)
     if (existing.type !== reqType) return false
 
     // Only escalate (increase), never decrease
     if (reqValue <= existing.value) return false
 
-    // Cap at MAX_TIGHTEN
-    if (reqValue > MAX_TIGHTEN) return false
+    // Cap at the type's maximum
+    if (reqValue > cap) return false
 
     // Replace the old class with the new higher value
     var oldClass = element.className || ''
     element.className = oldClass.replace(existing.fullClass, className)
   } else {
+    if (reqValue > cap) return false
     var existingClass = element.className || ''
     element.className = existingClass ? existingClass + ' ' + className : className
   }
 
   changesThisPass++
   var fp = computeFingerprint(element)
+  // Capture the natural (pre-IAL) line count and measure the first
+  // time a letter-spacing class is applied to this element, so the
+  // effectiveness-pruning pass can later tell whether the class made
+  // any difference. getPrinceBoxes here still reflects the layout from
+  // before this class takes effect (re-layout has not run yet), so for
+  // a first application it is the genuine baseline; escalation passes
+  // find a baseline already recorded and leave it intact.
+  if (!isShift && !lsBaselines[fp]) {
+    var baseM = measureElement(element)
+    if (baseM) lsBaselines[fp] = baseM
+  }
   var change = {
     className: className,
     reason: reason,
@@ -619,12 +866,32 @@ function addClass (element, className, reason, pageNum, severity, issueElement) 
     elementTag: element.tagName,
     elementId: element.id || '',
     fingerprint: fp,
-    textPreview: (element.textContent || '').substring(0, 80).replace(/\n/g, ' '),
-    issueElement: issueElement || element
+    // The element the class was applied to, so the prune pass can
+    // re-measure it after the sweep settles.
+    fixElement: element,
+    // Strip every newline variant so each manifest entry stays on
+    // one line (raw newlines would corrupt the parsed manifest).
+    textPreview: (element.textContent || '').substring(0, 80).replace(/[\r\n\u2028\u2029]+/g, ' '),
+    issueElement: issueElement || element,
+    // Reference to this pass's pre-fix chain-issue snapshot, used by the
+    // verification sweep to detect issues this fix relocated into its
+    // chain. Shared by reference across all changes recorded this pass.
+    chainBaseline: passChainBaseline
   }
   allChanges.push(change)
 
   return true
+}
+
+// Record a fix applied during this pass's detection loop so it can be
+// verified next pass. The FIRST fix becomes lastFixInfo, which gets the
+// full escalate-or-undo treatment. Every further fix that pass (applied
+// in another wrapper chain) is queued in pendingFixes for a lighter
+// regression check, so a fix that relocated its own issue into a worse
+// one is caught promptly rather than only by the end-of-run sweep.
+function trackFix (info) {
+  if (!lastFixInfo) lastFixInfo = info
+  else pendingFixes.push(info)
 }
 
 // Main detection function, called after each layout pass.
@@ -657,6 +924,7 @@ function detectAndFix () {
     '.nav-list',
     '.reference-index',
     '.reference-index-manual',
+    '.sidenote',
     '.title-page',
     '.toc',
     '.toc-list',
@@ -747,6 +1015,12 @@ function detectAndFix () {
   // Phase 2 will skip them as detection targets unless they can be
   // escalated by findOpportunity/findLoosenOpportunity.
   var paragraphInfos = []
+  // Samples gathered while measuring paragraphs, used once below to
+  // classify which paragraphs start at the top of a page: a global
+  // median line height (for tolerances) and a coordinate-orientation
+  // probe (whether reading order runs from smaller to larger y).
+  var lineHeightSamples = []
+  var orientationSample = null
   for (var i = 0; i < candidates.length; i++) {
     var el = candidates[i]
     var textSnippet = (el.textContent || '').substring(0, 50).replace(/\n/g, ' ')
@@ -797,6 +1071,58 @@ function detectAndFix () {
     }
     if (measure === 0) measure = 500
 
+    // Horizontal extent of this element's block boxes (left-most x
+    // and right-most x+w, in points relative to the page). Used —
+    // together with measure — to decide whether the element sits in
+    // the main running-text column or has been floated into a margin
+    // (e.g. sidenotes, pull quotes, or any project's custom float
+    // class). We deliberately keep both edges rather than a single
+    // edge so the test stays valid for right-to-left and centred
+    // text, where a single edge would be misleading.
+    var minX = null
+    var maxX = null
+    for (var b = 0; b < boxes.length; b++) {
+      var bx = boxes[b].x
+      var bxr = bx + boxes[b].w
+      if (minX === null || bx < minX) minX = bx
+      if (maxX === null || bxr > maxX) maxX = bxr
+    }
+
+    // Record, per page this paragraph touches, the top and bottom of
+    // this paragraph's content, taken from its TOP-LEVEL block boxes.
+    // We use the block boxes' own y (and y+h), not nested LINE-box y,
+    // because Prince reports block-box coordinates in absolute page
+    // space (the column-band logic below relies on the same), whereas
+    // LINE-box y can be relative to the parent block. These feed the
+    // page-top classification computed after the loop (startsAtPageTop
+    // / backward-fragile). Reading defensively: if Prince omits a
+    // coordinate, the comparisons simply yield no page-top match
+    // rather than throwing.
+    var extremeYByPage = {}
+    for (var gb = 0; gb < boxes.length; gb++) {
+      var gpn = boxes[gb].pageNum
+      var gTop = boxes[gb].y
+      var gBot = boxes[gb].y + boxes[gb].h
+      if (!extremeYByPage[gpn]) {
+        extremeYByPage[gpn] = { minY: gTop, maxY: gBot }
+      } else {
+        if (gTop < extremeYByPage[gpn].minY) extremeYByPage[gpn].minY = gTop
+        if (gBot > extremeYByPage[gpn].maxY) extremeYByPage[gpn].maxY = gBot
+      }
+      // Per-line height sample (height is reliable regardless of whether
+      // LINE-box position is absolute or relative), for tolerance maths.
+      var glines = []
+      collectLineBoxes(boxes[gb], glines)
+      for (var gl = 0; gl < glines.length; gl++) {
+        if (glines[gl].h > 0) lineHeightSamples.push(glines[gl].h)
+      }
+      // A block box with three or more lines reveals the y direction
+      // from its own top (box.y) versus its content extent (box.y+h).
+      if (orientationSample === null && glines.length >= 3) {
+        orientationSample = { firstY: boxes[gb].y, lastY: boxes[gb].y + boxes[gb].h }
+      }
+    }
+
     // DEBUG: log detailed info for elements of interest,
     // and a compact summary for all multi-page elements.
     var isInteresting = textSnippet.indexOf('sure can') >= 0 ||
@@ -844,9 +1170,184 @@ function detectAndFix () {
       totalLines: totalLines,
       lastLineWidth: lastLineW,
       measure: measure,
+      minX: minX,
+      maxX: maxX,
       byPage: byPage,
+      extremeYByPage: extremeYByPage,
+      startsAtPageTop: false,
       wrapperChain: getWrapperChain(el)
     })
+  }
+
+  // --- Determine the dominant body-text column width per chain ---
+  // Vertical-shift fixes (add-n/save-n) only make sense on a
+  // paragraph that sits in the main running-text column. A paragraph
+  // may have been floated out of that column by a sidenote, pull
+  // quote, or any project's custom float class, in which case a
+  // padding/margin shift won't move the page break as intended.
+  //
+  // Rather than rely on a hard-coded list of float classes (which can
+  // never keep up with custom CSS), we identify the main column by
+  // METRICS: the most common block width is the body column. We
+  // compute this PER WRAPPER CHAIN, because the body measure can
+  // differ between chains — e.g. frontmatter pages with no sidebar
+  // are wider than main-text pages that reserve a sidebar column.
+  // We bucket each element's measure (rounded to the nearest few
+  // points to absorb sub-pixel variation) and take the modal bucket
+  // within each chain.
+  var WIDTH_BUCKET = 4 // points; granularity for grouping measures
+  var chainWidthCounts = {} // chainId -> { bucket -> count }
+  for (var di = 0; di < paragraphInfos.length; di++) {
+    var pinfo = paragraphInfos[di]
+    var bucket = Math.round(pinfo.measure / WIDTH_BUCKET) * WIDTH_BUCKET
+    var ch = pinfo.wrapperChain
+    if (!chainWidthCounts[ch]) chainWidthCounts[ch] = {}
+    chainWidthCounts[ch][bucket] = (chainWidthCounts[ch][bucket] || 0) + 1
+  }
+  // Resolve the modal (dominant) measure for each chain.
+  var dominantByChain = {}
+  for (var chainKey in chainWidthCounts) {
+    var counts = chainWidthCounts[chainKey]
+    var best = 0
+    var bestCount = -1
+    for (var bk in counts) {
+      if (counts[bk] > bestCount) {
+        bestCount = counts[bk]
+        best = parseInt(bk, 10)
+      }
+    }
+    dominantByChain[chainKey] = best || 500 // safety fallback
+  }
+  function getDominantMeasure (chainId) {
+    var d = dominantByChain[chainId]
+    return (typeof d === 'number' && d > 0) ? d : 500
+  }
+
+  // Per-page horizontal band of the body column, derived from the
+  // boxes of paragraphs that match their chain's dominant measure on
+  // that page. Computed lazily and cached. Because the band is
+  // measured (not assumed from a particular edge), it stays correct
+  // for recto/verso mirroring and for right-to-left or centred text.
+  var columnBandCache = {}
+  function getColumnBand (pageNum) {
+    if (columnBandCache[pageNum]) return columnBandCache[pageNum]
+    var bandLeft = null
+    var bandRight = null
+    for (var p = 0; p < paragraphInfos.length; p++) {
+      var pi = paragraphInfos[p]
+      // Only consider full-width body paragraphs (per their own
+      // chain's dominant measure) present on this page.
+      if (Math.abs(pi.measure - getDominantMeasure(pi.wrapperChain)) > WIDTH_BUCKET * 2) continue
+      if (pi.minX === null || !pi.byPage[pageNum]) continue
+      if (bandLeft === null || pi.minX < bandLeft) bandLeft = pi.minX
+      if (bandRight === null || pi.maxX > bandRight) bandRight = pi.maxX
+    }
+    var band = (bandLeft === null) ? null : { left: bandLeft, right: bandRight }
+    columnBandCache[pageNum] = band || { left: 0, right: 0, empty: true }
+    return columnBandCache[pageNum]
+  }
+
+  // Decide whether a paragraph sits in the main running-text column
+  // and is therefore a valid target for a vertical shift.
+  //   1. Width gate (primary, direction-agnostic): the element's
+  //      measure must be close to its CHAIN'S dominant body measure —
+  //      this rejects narrow floats (sidenotes) and wide ones alike.
+  //   2. Containment gate (secondary, direction-agnostic): the
+  //      element's horizontal extent must overlap the page's body
+  //      column band by most of its own width. This catches a float
+  //      that happens to be near body width but sits in the margin,
+  //      without ever comparing a single edge (so it holds for RTL
+  //      and centred text).
+  var WIDTH_TOLERANCE = 0.15 // ±15% of dominant measure
+  var MIN_BAND_OVERLAP = 0.8 // ≥80% of the element's width inside band
+  function isInMainFlow (info) {
+    if (info.measure <= 0) return false
+    // Width gate, against this element's chain dominant measure.
+    var dominant = getDominantMeasure(info.wrapperChain)
+    var ratio = info.measure / dominant
+    if (ratio < (1 - WIDTH_TOLERANCE) || ratio > (1 + WIDTH_TOLERANCE)) return false
+    // Containment gate, checked on the element's first page.
+    var band = getColumnBand(info.firstPage)
+    if (!band || band.empty) return true // no band to compare against
+    if (info.minX === null) return true
+    var elWidth = info.maxX - info.minX
+    if (elWidth <= 0) return true
+    var overlap = Math.min(info.maxX, band.right) - Math.max(info.minX, band.left)
+    if (overlap < 0) overlap = 0
+    return (overlap / elWidth) >= MIN_BAND_OVERLAP
+  }
+
+  // --- Classify page-position fragility (once, for the catalogue) ---
+  // Flag every paragraph that STARTS at the top of a page. Such
+  // paragraphs are 'backward-fragile' (see buildCatalogue): safe to
+  // receive an IAL, and only at risk from line-saving on preceding
+  // pages. Detection uses both signals (method D):
+  //   (A) the paragraph is the topmost content on its own first page; and
+  //   (B) that top sits within the global body-text top band — which
+  //       excludes sunk chapter openers and other low-starting pages.
+  if (!catalogue) {
+    // Coordinate orientation: does reading order run from smaller to
+    // larger y? Probe a multi-line paragraph so the classification is
+    // robust to Prince's coordinate conventions.
+    var yTopIsSmaller = orientationSample ? (orientationSample.firstY < orientationSample.lastY) : true
+    // Normalize a raw y so a SMALLER value is always nearer the page
+    // top, whichever way the coordinate system runs.
+    var topness = function (y) { return yTopIsSmaller ? y : -y }
+    // The topmost line of a paragraph on a given page, in topness space.
+    var paraTopOnPage = function (pInfo, page) {
+      var ex = pInfo.extremeYByPage[page]
+      if (!ex) return null
+      var a = topness(ex.minY)
+      var c = topness(ex.maxY)
+      return a < c ? a : c
+    }
+    // Median line height, for half-line / one-line tolerances.
+    var lineHeight = 14
+    if (lineHeightSamples.length) {
+      lineHeightSamples.sort(function (a, c) { return a - c })
+      lineHeight = lineHeightSamples[Math.floor(lineHeightSamples.length / 2)] || 14
+    }
+    // Topmost content on each page, across ALL paragraphs, so a
+    // paragraph continuing from an earlier page is counted when it
+    // occupies the top of a page.
+    var pageTop = {}
+    for (var pti = 0; pti < paragraphInfos.length; pti++) {
+      var exByPage = paragraphInfos[pti].extremeYByPage
+      for (var pg in exByPage) {
+        var t = paraTopOnPage(paragraphInfos[pti], pg)
+        if (t === null) continue
+        if (pageTop[pg] === undefined || t < pageTop[pg]) pageTop[pg] = t
+      }
+    }
+    // Global body-text top band: the modal per-page top. Normal pages
+    // share a top; sunk chapter openers fall outside the band.
+    var bandStep = (lineHeight * 0.5) || 7
+    var bandBucket = {}
+    for (var pg2 in pageTop) {
+      var bk = Math.round(pageTop[pg2] / bandStep)
+      bandBucket[bk] = (bandBucket[bk] || 0) + 1
+    }
+    var bestBk = null
+    var bestBkCount = -1
+    for (var bkk in bandBucket) {
+      if (bandBucket[bkk] > bestBkCount) { bestBkCount = bandBucket[bkk]; bestBk = parseInt(bkk, 10) }
+    }
+    var bodyTopBand = (bestBk === null) ? 0 : bestBk * bandStep
+    // Flag each paragraph that starts at the top of a normal page.
+    for (var sti = 0; sti < paragraphInfos.length; sti++) {
+      var sInfo = paragraphInfos[sti]
+      var myTop = paraTopOnPage(sInfo, sInfo.firstPage)
+      var atTop = false
+      if (myTop !== null && pageTop[sInfo.firstPage] !== undefined) {
+        // (A) topmost content on its own page (within half a line)
+        var isFirstOnPage = myTop <= pageTop[sInfo.firstPage] + lineHeight * 0.5
+        // (B) near the global body-text top band (within one line);
+        // paragraphs that start LOWER than the band are excluded.
+        var inBand = (myTop - bodyTopBand) <= lineHeight
+        atTop = isFirstOnPage && inBand
+      }
+      sInfo.startsAtPageTop = atTop
+    }
   }
 
   // --- Build catalogue on first pass ---
@@ -873,6 +1374,8 @@ function detectAndFix () {
         'REFINE_DEBUG|CATALOGUE_FRAGILE|' + frag.potentialType +
         '|page=' + frag.page + '|severity=' + frag.potentialSeverity +
         '|trigger=' + frag.trigger +
+        '|kind=' + (frag.kind || 'n/a') +
+        '|candidateEligible=' + (frag.candidateEligible === true) +
         '|hasCandidate=' + frag.hasCandidate
       )
     }
@@ -905,6 +1408,116 @@ function detectAndFix () {
   //
   // Rule of thumb: tighten-N saves approximately N/TIGHTEN_CHARS_PER_STEP
   // characters per line, so a paragraph of L lines with tighten-N saves
+  // When a self-tighten on a lone-line-top gives up, try findOpportunity
+  // as a fallback: a nearby paragraph may absorb a line more effectively.
+  // Returns true if a fallback fix was applied (keeps lastFixInfo alive).
+  function tryFallbackOpportunity (fixInfo) {
+    if (!fixInfo.selfTightened) return false
+    if (fixInfo.issueType !== 'lone-line-top') return false
+    if (typeof fixInfo.issueIdx !== 'number') return false
+
+    var opportunity = findOpportunity(fixInfo.issueIdx, fixInfo.pageNum)
+    if (!opportunity) return false
+    // Don't pick the same element we just undid
+    if (opportunity.element === fixInfo.fixElement) return false
+
+    var tighten = estimateTighten(opportunity.totalLines)
+    var applied = addClass(opportunity.element, 'tighten-' + tighten, fixInfo.issueType, fixInfo.pageNum, fixInfo.severity, fixInfo.issueElement)
+    if (!applied) return false
+
+    fixApplied = true
+    fixedChains[getWrapperChain(opportunity.element)] = true
+    console.log('REFINE_DEBUG|FALLBACK_OPP|tighten-' + tighten + '|' + fixInfo.issueType + '|page=' + fixInfo.pageNum + '|text=' + (opportunity.element.textContent || '').substring(0, 50))
+    // Update lastFixInfo to track the fallback fix for verification
+    lastFixInfo = { issueElement: fixInfo.issueElement, issueType: fixInfo.issueType, fixElement: opportunity.element, pageNum: fixInfo.pageNum, severity: fixInfo.severity, issueIdx: fixInfo.issueIdx, selfTightened: false }
+    return true
+  }
+
+  // Find the opening paragraph of a wrapper chain: the first
+  // mappable, in-flow paragraph belonging to the issue's chain that
+  // sits above the issue. Vertical-shift fixes (add-n/save-n) are
+  // applied here to move the whole chapter by whole lines. We always
+  // return the same (first eligible) element for a given chain so
+  // that escalation targets one opener rather than spreading shifts
+  // across siblings.
+  // We skip any candidate that isn't in the main running-text column
+  // (isInMainFlow) — e.g. a paragraph floated into a margin by a
+  // sidenote or custom float class — because shifting an out-of-flow
+  // element won't move the page break. An opener that already carries
+  // a letter-spacing class is still valid: a tighten/loosen and a
+  // shift can coexist; if it already carries a shift, addClass will
+  // no-op and the verification pass handles escalation.
+  function findOpener (issueChain, issueIdx) {
+    for (var k = 0; k < issueIdx; k++) {
+      var cand = paragraphInfos[k]
+      if (cand.wrapperChain !== issueChain) continue
+      if (!isInMainFlow(cand)) continue
+      return cand
+    }
+    return null
+  }
+
+  // Last-resort fallback for lone-line issues that tightening and
+  // loosening could not resolve: shift the chapter opener DOWN by one
+  // whole line ($line-height-default) so the page break moves earlier
+  // in the content and the offending line rejoins its paragraph.
+  //   lone-line-bottom -> add-1  (push content down; the stranded
+  //     first line drops to the next page to rejoin its paragraph)
+  //   lone-line-top    -> add-1  (push content down; the penultimate
+  //     line moves over the break to join the stranded last line)
+  // Both directions use add-N (inserting space at the opener), which is
+  // always safe: it cannot collide with the chapter heading. We do NOT
+  // use a save-N shift (REMOVING space to pull content UP) for
+  // lone-line-tops, because that relies on slack between the chapter
+  // heading and its first paragraph that many opener designs don't
+  // provide. The risk of an add-N — that shifting the whole chapter
+  // relocates the page break and creates a new lone-line issue
+  // elsewhere — is caught by the end-of-run verification sweep, which
+  // undoes any shift that left a new issue in the chain.
+  // Applies the class to the chain's opening paragraph and, if no
+  // other fix is being tracked this pass, records it for next-pass
+  // verification. Returns true if a shift was applied.
+  function tryVerticalShift (issueEl, issueIdx, issueType, issueChain, pageNum, severity) {
+    // Both lone-line-bottoms and lone-line-tops get a downward shift (add-N).
+    if (issueType !== 'lone-line-bottom' && issueType !== 'lone-line-top') return false
+    if (!canFixInChain(issueChain)) return false
+
+    var opener = findOpener(issueChain, issueIdx)
+    if (!opener) return false
+    // Shifting the issue paragraph itself wouldn't move the page
+    // break relative to its own lines, so there's no point.
+    if (opener.element === issueEl) return false
+
+    var shiftClass = 'add-1'
+    var applied = addClass(opener.element, shiftClass, issueType, pageNum, severity, issueEl)
+    if (!applied) return false
+
+    fixApplied = true
+    fixedChains[issueChain] = true
+    console.log('REFINE_DEBUG|VERTICAL_SHIFT|' + shiftClass + '|' + issueType + '|page=' + pageNum + '|text=' + (opener.element.textContent || '').substring(0, 50))
+    // Track only if no other fix owns this pass's verification slot;
+    // otherwise the end-of-run sweep verifies this shift.
+    if (!lastFixInfo) {
+      lastFixInfo = { issueElement: issueEl, issueType: issueType, fixElement: opener.element, pageNum: pageNum, severity: severity, issueIdx: issueIdx, selfTightened: false, verticalShift: true }
+    }
+    return true
+  }
+
+  // Called when a fix has been undone and no fallback opportunity
+  // exists. Tries a vertical-shift fallback (unless the failed fix
+  // was itself a vertical shift, to avoid retrying the same move),
+  // then records the issue as skipped if nothing worked.
+  function giveUpOrShift (info) {
+    var shifted = false
+    if (!info.verticalShift) {
+      shifted = tryVerticalShift(info.issueElement, info.issueIdx, info.issueType, getWrapperChain(info.issueElement), info.pageNum, info.severity)
+    }
+    if (!shifted) {
+      skippedElements.push({ el: info.issueElement, type: info.issueType })
+      console.log('REFINE_DEBUG|GAVE_UP|' + info.issueType + '|page=' + info.pageNum)
+    }
+  }
+
   // N*L/TIGHTEN_CHARS_PER_STEP characters total. A full line holds roughly
   // CHARS_PER_LINE characters, so the last line of a candidate paragraph
   // contains lastLineWidth/measure * CHARS_PER_LINE characters. The tighten
@@ -924,6 +1537,10 @@ function detectAndFix () {
       if (candidate.totalLines < 3) continue
       // Stop searching if we've gone too far back
       if (lonePage - candidate.lastPage > LOOKBACK_PAGES) break
+
+      // Skip candidates already carrying a vertical-shift class —
+      // letter-spacing and vertical shifts shouldn't stack.
+      if (getVerticalShiftInfo(candidate.element)) continue
 
       // If already tightened, check if we can escalate
       var existingInfo = getTrackingInfo(candidate.element)
@@ -951,12 +1568,36 @@ function detectAndFix () {
       // Characters in the candidate's last line
       var charsInLastLine = (lastLineW / measure) * CHARS_PER_LINE
 
-      // Only use this candidate if tightening can plausibly save a line
-      if (charsSaved >= charsInLastLine) {
+      // Only use this candidate if tightening can plausibly save a line.
+      // Use 90% threshold since char estimates are approximate.
+      if (charsSaved >= charsInLastLine * 0.9) {
         return candidate
       }
     }
     return null
+  }
+
+  // Estimate whether tightening a SINGLE paragraph can plausibly save a
+  // whole line. Mirrors the viability test inside findOpportunity:
+  // tighten-N saves roughly N/TIGHTEN_CHARS_PER_STEP characters per line,
+  // and to lose a line the paragraph must absorb the characters currently
+  // sitting on its last line. We use this to decide whether self-tightening
+  // a lone-line-top paragraph can actually pull its lone last line back
+  // onto the previous page, or whether we should instead prefer a
+  // preceding-paragraph tighten. A wide lone line needs many characters
+  // absorbed, which a tighten on the issue paragraph alone often cannot
+  // achieve — in which case self-tightening would fail and be undone.
+  function tightenCanSaveLine (info) {
+    var CHARS_PER_LINE = 60
+    var TIGHTEN_CHARS_PER_STEP = 5
+    if (info.totalLines < 3) return false
+    var lastLineW = info.lastLineWidth
+    var measure = info.measure
+    if (lastLineW <= 0 || measure <= 0) return false
+    var tightenN = estimateTighten(info.totalLines)
+    var charsSaved = (tightenN / TIGHTEN_CHARS_PER_STEP) * info.totalLines
+    var charsInLastLine = (lastLineW / measure) * CHARS_PER_LINE
+    return charsSaved >= charsInLastLine * 0.9
   }
 
   // Find the nearest preceding paragraph that can realistically GAIN
@@ -986,6 +1627,9 @@ function detectAndFix () {
       var candidate = paragraphInfos[j]
       if (candidate.totalLines < 3) continue
       if (lonePage - candidate.lastPage > LOOKBACK_PAGES) break
+
+      // Skip candidates already carrying a vertical-shift class.
+      if (getVerticalShiftInfo(candidate.element)) continue
 
       // If already loosened, check if we can escalate
       var existingInfo = getTrackingInfo(candidate.element)
@@ -1115,6 +1759,19 @@ function detectAndFix () {
     return !fixedChains[chain]
   }
 
+  // Snapshot the lone-line issues present in every wrapper chain in the
+  // CURRENT (pre-fix) layout. Any fix recorded later this pass copies this
+  // by reference, giving the end-of-run sweep a baseline to detect issues
+  // a fix relocated into its chain.
+  passChainBaseline = {}
+  for (var bi = 0; bi < paragraphInfos.length; bi++) {
+    var biIssue = infoIssue(paragraphInfos[bi])
+    if (!biIssue) continue
+    var biChain = paragraphInfos[bi].wrapperChain
+    if (!passChainBaseline[biChain]) passChainBaseline[biChain] = {}
+    passChainBaseline[biChain][computeFingerprint(paragraphInfos[bi].element)] = biIssue.severity
+  }
+
   // Verify the fix from the previous pass. If the issue is
   // still present, escalate the fix value. If we can't escalate
   // further, undo the fix and skip that issue permanently.
@@ -1129,23 +1786,23 @@ function detectAndFix () {
 
     if (!issueStillPresent) {
       // Regression check: did fixing one issue create an equal-or-worse
-      // issue on the same element? E.g. fixing a lone-line-bottom (sev 1)
-      // can shift the line to the top of the next page, creating a
-      // lone-line-top (sev 2) — a worse outcome.
-      // Severity: lone-line-top = 2, lone-line-bottom = 1.
-      var originalSev = lastFixInfo.issueType === 'lone-line-top' ? 2 : 1
+      // issue? Compare using the canonical 1–7 severities (a lone-line-bottom
+      // is 2–3, a lone-line-top 4–7), so trading a low-severity
+      // lone-line-bottom for a high-severity lone-line-top is always rejected.
+      var originalSev = lastFixInfo.severity
       var regression = false
       var regressionType = null
 
-      // Check the issue element for either type of lone-line issue
-      if (checkLoneLineTop(lastFixInfo.issueElement)) {
-        if (2 >= originalSev) {
-          regression = true
-          regressionType = 'lone-line-top'
-        }
+      // (a) Same-element regression: the fix turned the issue paragraph
+      // itself into a same-or-worse lone-line issue of the other kind.
+      var newTopSev = loneLineTopSeverity(lastFixInfo.issueElement)
+      if (newTopSev > 0 && newTopSev >= originalSev) {
+        regression = true
+        regressionType = 'lone-line-top'
       }
-      if (!regression && checkLoneLineBottom(lastFixInfo.issueElement)) {
-        if (1 >= originalSev) {
+      if (!regression) {
+        var newBotSev = loneLineBottomSeverity(lastFixInfo.issueElement)
+        if (newBotSev > 0 && newBotSev >= originalSev) {
           regression = true
           regressionType = 'lone-line-bottom'
         }
@@ -1156,7 +1813,7 @@ function detectAndFix () {
         // Skip only the original issue type, so the element can
         // still be detected for the regressed (different) type.
         skippedElements.push({ el: lastFixInfo.issueElement, type: lastFixInfo.issueType })
-        undoFix(lastFixInfo.fixElement)
+        undoFix(lastFixInfo.fixElement, lastFixInfo.verticalShift ? 'vs' : 'ls')
         console.log('REFINE_DEBUG|REGRESSION|' + lastFixInfo.issueType + '->' + regressionType + '|page=' + lastFixInfo.pageNum)
         lastFixInfo = null
       } else {
@@ -1164,10 +1821,27 @@ function detectAndFix () {
         lastFixInfo = null
       }
     } else {
-      // Fix didn't work — jump straight to MAX_TIGHTEN.
-      // If already at MAX_TIGHTEN (or close), give up.
+      // Fix didn't work. Escalate it: vertical shifts grow by one
+      // line at a time; letter-spacing jumps straight to MAX_TIGHTEN.
+      // If we can't escalate further, give up (with fallbacks).
+      var shiftTrack = getVerticalShiftInfo(lastFixInfo.fixElement)
       var fixTrack = getTrackingInfo(lastFixInfo.fixElement)
-      if (fixTrack && fixTrack.value < MAX_TIGHTEN) {
+      if (shiftTrack && shiftTrack.value < MAX_SHIFT_LINES) {
+        // Escalate the chapter-opener shift by one more whole line.
+        var newShift = shiftTrack.type + '-' + (shiftTrack.value + 1)
+        var shiftEscalated = addClass(lastFixInfo.fixElement, newShift, lastFixInfo.issueType, lastFixInfo.pageNum, lastFixInfo.severity, lastFixInfo.issueElement)
+        if (shiftEscalated) {
+          fixApplied = true
+          fixedChains[getWrapperChain(lastFixInfo.fixElement)] = true
+          console.log('REFINE_DEBUG|ESCALATED|' + newShift + '|' + lastFixInfo.issueType + '|page=' + lastFixInfo.pageNum)
+          // Keep lastFixInfo — verify again next pass
+        } else {
+          undoFix(lastFixInfo.fixElement, 'vs')
+          var giveUpInfoS = lastFixInfo
+          lastFixInfo = null
+          giveUpOrShift(giveUpInfoS)
+        }
+      } else if (fixTrack && fixTrack.value < MAX_TIGHTEN) {
         var newClass = fixTrack.type + '-' + MAX_TIGHTEN
         var escalated = addClass(lastFixInfo.fixElement, newClass, lastFixInfo.issueType, lastFixInfo.pageNum, lastFixInfo.severity, lastFixInfo.issueElement)
         if (escalated) {
@@ -1176,18 +1850,84 @@ function detectAndFix () {
           console.log('REFINE_DEBUG|ESCALATED|' + newClass + '|' + lastFixInfo.issueType + '|page=' + lastFixInfo.pageNum)
           // Keep lastFixInfo — verify again next pass
         } else {
-          skippedElements.push({ el: lastFixInfo.issueElement, type: lastFixInfo.issueType })
-          undoFix(lastFixInfo.fixElement)
-          console.log('REFINE_DEBUG|GAVE_UP|' + lastFixInfo.issueType + '|page=' + lastFixInfo.pageNum)
-          lastFixInfo = null
+          // Escalation failed — try findOpportunity, then a vertical
+          // shift of the chapter opener, before finally giving up.
+          undoFix(lastFixInfo.fixElement, 'ls')
+          var fallbackApplied = tryFallbackOpportunity(lastFixInfo)
+          if (!fallbackApplied) {
+            var giveUpInfo = lastFixInfo
+            lastFixInfo = null
+            giveUpOrShift(giveUpInfo)
+          }
         }
       } else {
-        // Already at MAX_TIGHTEN — give up and undo
-        skippedElements.push({ el: lastFixInfo.issueElement, type: lastFixInfo.issueType })
-        undoFix(lastFixInfo.fixElement)
-        console.log('REFINE_DEBUG|GAVE_UP|' + lastFixInfo.issueType + '|page=' + lastFixInfo.pageNum)
-        lastFixInfo = null
+        // Already at max (letter-spacing or shift) — try
+        // findOpportunity, then a vertical shift, before giving up.
+        undoFix(lastFixInfo.fixElement, lastFixInfo.verticalShift ? 'vs' : 'ls')
+        var fallbackApplied = tryFallbackOpportunity(lastFixInfo)
+        if (!fallbackApplied) {
+          var giveUpInfo = lastFixInfo
+          lastFixInfo = null
+          giveUpOrShift(giveUpInfo)
+        }
       }
+    }
+  }
+
+  // Regression-check every ADDITIONAL fix applied in the previous pass —
+  // the fixes in other wrapper chains that did not become lastFixInfo
+  // (handled above). Their issue paragraphs have now reflowed, so we can
+  // tell whether each fix actually helped. Without this they would only be
+  // checked by the end-of-run sweep, which can miss a fix whose relocated
+  // blemish a later fix has already masked: when one fix resolves a
+  // lone-line-bottom but strands that same paragraph's last line as a worse
+  // lone-line-top, a later fix in the chain can clear the new lone-line-top
+  // before the sweep runs, leaving the original harmful fix in place. We
+  // catch that case here: a fix that resolved its own issue but turned the
+  // SAME paragraph into a same-or-worse lone-line issue of the other kind
+  // has raised severity, so we undo it and abandon the original (milder)
+  // issue rather than chase the cascade it would start.
+  var regressionUndone = false
+  var checkFixes = pendingFixes
+  pendingFixes = []
+  for (var pf = 0; pf < checkFixes.length; pf++) {
+    var pfx = checkFixes[pf]
+    if (!pfx.issueElement) continue
+
+    // If the original issue is still present, leave the fix for the
+    // end-of-run sweep (which undoes still-unresolved fixes). We act here
+    // only on fixes that "worked" but made the same paragraph worse.
+    var pfStillPresent = false
+    if (pfx.issueType === 'lone-line-bottom') pfStillPresent = checkLoneLineBottom(pfx.issueElement)
+    else if (pfx.issueType === 'lone-line-top') pfStillPresent = checkLoneLineTop(pfx.issueElement)
+    if (pfStillPresent) continue
+
+    // Original issue resolved — did it relocate onto the SAME paragraph
+    // as a same-or-worse issue of the other kind? Compare canonical 1–7
+    // severities, so trading a mild lone-line-bottom (2–3) for a worse
+    // lone-line-top (4–7) is always rejected.
+    var pfOrigSev = pfx.severity
+    var pfRegressed = false
+    var pfNewType = null
+    var pfTopSev = loneLineTopSeverity(pfx.issueElement)
+    if (pfTopSev > 0 && pfTopSev >= pfOrigSev) {
+      pfRegressed = true
+      pfNewType = 'lone-line-top'
+    }
+    if (!pfRegressed) {
+      var pfBotSev = loneLineBottomSeverity(pfx.issueElement)
+      if (pfBotSev > 0 && pfBotSev >= pfOrigSev) {
+        pfRegressed = true
+        pfNewType = 'lone-line-bottom'
+      }
+    }
+    if (pfRegressed) {
+      // Abandon the original issue so it isn't re-detected and re-fixed
+      // (which would re-create this regression), then undo the fix.
+      skippedElements.push({ el: pfx.issueElement, type: pfx.issueType })
+      undoFix(pfx.fixElement, pfx.verticalShift ? 'vs' : 'ls')
+      regressionUndone = true
+      console.log('REFINE_DEBUG|REGRESSION|' + pfx.issueType + '->' + pfNewType + '|page=' + pfx.pageNum)
     }
   }
 
@@ -1197,6 +1937,48 @@ function detectAndFix () {
   function isSkippedFor (element, issueType) {
     for (var s = 0; s < skippedElements.length; s++) {
       if (skippedElements[s].el === element && skippedElements[s].type === issueType) return true
+    }
+    return false
+  }
+
+  // The current canonical-severity issue for a freshly measured
+  // paragraph (this pass's layout). Returns { severity, type } for the
+  // worst lone-line issue the paragraph currently has, or null if none.
+  function infoIssue (info) {
+    if (info.pageNums.length <= 1) return null
+    var best = null
+    var firstBoxes = info.byPage[info.pageNums[0]]
+    var firstLines = 0
+    for (var b = 0; b < firstBoxes.length; b++) firstLines += countLines(firstBoxes[b])
+    if (firstLines === 1) {
+      best = { severity: isRecto(info.firstPage) ? 3 : 2, type: 'lone-line-bottom' }
+    }
+    var lastBoxes = info.byPage[info.lastPage]
+    var lastLines = 0
+    for (var b = 0; b < lastBoxes.length; b++) lastLines += countLines(lastBoxes[b])
+    if (lastLines === 1) {
+      var isWide = info.lastLineWidth > info.measure * 0.5
+      var tsev = isWide ? (isRecto(info.lastPage) ? 4 : 5) : (isRecto(info.lastPage) ? 6 : 7)
+      if (!best || tsev > best.severity) best = { severity: tsev, type: 'lone-line-top' }
+    }
+    return best
+  }
+
+  // True if the wrapper chain still has an actionable issue strictly
+  // more severe than `threshold` on some element other than `excludeEl`.
+  // "Actionable" means not already given up (skipped) for that type, so
+  // a permanently unfixable lone-line-top does not block lone-line-bottom
+  // fixes forever. Used by the sequencing gate to defer a lone-line-bottom
+  // fix while any higher-severity issue in its chain is still pending.
+  function chainHasHigherActionableIssue (chain, threshold, excludeEl) {
+    for (var p = 0; p < paragraphInfos.length; p++) {
+      var pi = paragraphInfos[p]
+      if (pi.wrapperChain !== chain) continue
+      if (pi.element === excludeEl) continue
+      var iss = infoIssue(pi)
+      if (!iss || iss.severity <= threshold) continue
+      if (isSkippedFor(pi.element, iss.type)) continue
+      return true
     }
     return false
   }
@@ -1232,7 +2014,17 @@ function detectAndFix () {
 
         // Apply a fix if we can (one fix per wrapper chain per pass)
         var chain = info.wrapperChain
-        if (canFixInChain(chain)) {
+        if (canFixInChain(chain) && chainHasHigherActionableIssue(chain, severity, el)) {
+          // Sequencing gate (principle 1): a lone-line-bottom is the least
+          // severe lone-line issue (sev 2–3). Don't chase it while any
+          // strictly-more-severe issue (a lone-line-top, sev 4–7) is still
+          // actionable in the same wrapper chain — fixing those first
+          // may resolve the lone-line-bottom for free and avoids spending a
+          // fix that a later, higher-priority fix would disturb. The
+          // lone-line-bottom is only deferred: once the chain's higher-severity
+          // issues are resolved or given up, it is reconsidered on a later pass.
+          console.log('REFINE_DEBUG|DEFERRED|lone-line-bottom|page=' + pn + '|severity=' + severity + '|reason=higher-severity-pending')
+        } else if (canFixInChain(chain)) {
           // Strategy 1: Tighten a preceding paragraph
           var tightenTarget = findOpportunity(i, pn)
           if (tightenTarget && shouldFix(pn, severity, 'tighten', chain)) {
@@ -1240,11 +2032,10 @@ function detectAndFix () {
             addClass(tightenTarget.element, 'tighten-' + tighten, 'lone-line-bottom', pn, severity, el)
             fixApplied = true
             fixedChains[chain] = true
-            // Only track the first fix for pass-by-pass verification.
-            // Fixes in other chains are verified by the sweep.
-            if (!lastFixInfo) {
-              lastFixInfo = { issueElement: el, issueType: 'lone-line-bottom', fixElement: tightenTarget.element, pageNum: pn, severity: severity }
-            }
+            // Track the first fix in lastFixInfo for escalate-or-undo
+            // verification; any further fixes this pass are queued for a
+            // regression check (trackFix), not left to the sweep alone.
+            trackFix({ issueElement: el, issueType: 'lone-line-bottom', fixElement: tightenTarget.element, pageNum: pn, severity: severity, issueIdx: i })
           }
 
           // Strategy 2: Loosen a preceding paragraph
@@ -1255,9 +2046,7 @@ function detectAndFix () {
               addClass(loosenTarget.element, 'loosen-' + loosen, 'lone-line-bottom', pn, severity, el)
               fixApplied = true
               fixedChains[chain] = true
-              if (!lastFixInfo) {
-                lastFixInfo = { issueElement: el, issueType: 'lone-line-bottom', fixElement: loosenTarget.element, pageNum: pn, severity: severity }
-              }
+              trackFix({ issueElement: el, issueType: 'lone-line-bottom', fixElement: loosenTarget.element, pageNum: pn, severity: severity, issueIdx: i })
             }
           }
 
@@ -1270,14 +2059,16 @@ function detectAndFix () {
             addClass(el, 'tighten-' + selfTighten, 'lone-line-bottom', pn, severity, el)
             fixApplied = true
             fixedChains[chain] = true
-            if (!lastFixInfo) {
-              lastFixInfo = { issueElement: el, issueType: 'lone-line-bottom', fixElement: el, pageNum: pn, severity: severity }
-            }
+            trackFix({ issueElement: el, issueType: 'lone-line-bottom', fixElement: el, pageNum: pn, severity: severity, issueIdx: i })
           }
 
           if (canFixInChain(chain)) {
-            console.log('REFINE_DEBUG|NO_FIX|lone-line-bottom|page=' + pn + '|lines=' + totalLines + '|text=' + (el.textContent || '').substring(0, 50))
-            skippedElements.push({ el: el, type: 'lone-line-bottom' })
+            // Last resort: shift the chapter opener down a whole line
+            // (add-1) so the stranded first line drops to the next page.
+            if (!tryVerticalShift(el, i, 'lone-line-bottom', chain, pn, severity)) {
+              console.log('REFINE_DEBUG|NO_FIX|lone-line-bottom|page=' + pn + '|lines=' + totalLines + '|text=' + (el.textContent || '').substring(0, 50))
+              skippedElements.push({ el: el, type: 'lone-line-bottom' })
+            }
           }
         }
       }
@@ -1311,15 +2102,41 @@ function detectAndFix () {
         var chain = info.wrapperChain
         if (canFixInChain(chain)) {
           if (shouldFix(lastPage, severity, 'tighten', chain)) {
-            var opportunity = findOpportunity(i, lastPage)
-            var target = opportunity || info
+            // For lone-line-top, prefer self-tightening the issue paragraph
+            // first: absorbing your own lone line is more reliable than
+            // cascading a line-save through multiple intervening paragraphs.
+            // Short paragraphs (< 5 lines) only self-tighten if their
+            // lone line is very short (< 10% of measure), since squeezing
+            // a few lines together is aggressive and visibly distorts text.
+            //
+            // But self-tightening only HELPS if it can save a whole line —
+            // otherwise the lone last line stays put, the tighten gets
+            // undone on verification, and the issue is abandoned. So we
+            // self-tighten only when it is both aesthetically acceptable
+            // AND effective (can plausibly save a line). When it cannot
+            // clear the lone line (typically a wide lone line that needs
+            // more characters absorbed than this paragraph alone can save),
+            // we prefer a preceding-paragraph tighten: saving a line
+            // upstream shifts the lone line back without distorting the
+            // issue paragraph. Self-tightening remains the last resort when
+            // no upstream opportunity exists.
+            var lastLineFraction = info.measure > 0 ? info.lastLineWidth / info.measure : 1
+            var selfTightenAcceptable = totalLines >= 5 || lastLineFraction < 0.1
+            var selfTightenEffective = tightenCanSaveLine(info)
+            var target
+            if (selfTightenAcceptable && selfTightenEffective) {
+              target = info
+            } else {
+              // Look upstream for a paragraph that can save a line; only
+              // squeeze the issue paragraph itself if nothing is found.
+              var opportunity = findOpportunity(i, lastPage)
+              target = opportunity || info
+            }
             var tighten = estimateTighten(target.totalLines)
             addClass(target.element, 'tighten-' + tighten, 'lone-line-top', lastPage, severity, el)
             fixApplied = true
             fixedChains[chain] = true
-            if (!lastFixInfo) {
-              lastFixInfo = { issueElement: el, issueType: 'lone-line-top', fixElement: target.element, pageNum: lastPage, severity: severity }
-            }
+            trackFix({ issueElement: el, issueType: 'lone-line-top', fixElement: target.element, pageNum: lastPage, severity: severity, issueIdx: i, selfTightened: target === info })
           } else {
             console.log('REFINE_DEBUG|NO_FIX|lone-line-top|page=' + lastPage + '|lines=' + totalLines + '|reason=cascade-blocked|text=' + (el.textContent || '').substring(0, 50))
             skippedElements.push({ el: el, type: 'lone-line-top' })
@@ -1346,19 +2163,21 @@ function detectAndFix () {
           addClass(el, 'tighten-' + tighten, 'short-line', pageNums[0], 1, el)
           fixApplied = true
           fixedChains[chain] = true
-          if (!lastFixInfo) {
-            lastFixInfo = { issueElement: el, issueType: 'short-line', fixElement: el, pageNum: pageNums[0], severity: 1 }
-          }
+          trackFix({ issueElement: el, issueType: 'short-line', fixElement: el, pageNum: pageNums[0], severity: 1 })
         }
       }
     }
   }
 
   // If we applied a fix and haven't hit the pass budget, register
-  // for another pass. Reserve the last passes for the sweep.
-  if (fixApplied && refinePass < MAX_FIX_PASSES) {
-    // A new fix was applied, so allow another post-sweep resume
-    // cycle if needed later.
+  // for another pass. Reserve the last passes for the sweep. We also
+  // continue when a regression-undo above removed a fix but the loop
+  // applied nothing new: the layout still needs one pass to reflow the
+  // undo (and re-expose the original, milder issue) before the sweep
+  // runs on a settled layout.
+  if ((fixApplied || regressionUndone) && refinePass < MAX_FIX_PASSES) {
+    // A new fix was applied (or a regression undone), so allow another
+    // post-sweep resume cycle if needed later.
     postSweepStalled = false
     console.log('REFINE_DEBUG|PASS_CONTINUE|pass=' + refinePass + '|changes=' + changesThisPass)
     Prince.registerPostLayoutFunc(detectAndFix)
@@ -1376,12 +2195,35 @@ function detectAndFix () {
   if (!sweepDone && allChanges.length > 0) {
     sweepDone = true
     var undone = 0
+    // Counts lone-line-tops we resolved during the sweep by adding a vertical
+    // shift (add-N on the chapter opener) instead of undoing the fix
+    // that introduced them. Like undos, these need a follow-up pass for
+    // the new class to take effect and be verified.
+    var shiftedInSweep = 0
 
     console.log('REFINE_DEBUG|SWEEP_START|tracked=' + allChanges.length)
 
-    // Iterate backwards since undoFix splices from allChanges
-    for (var v = allChanges.length - 1; v >= 0; v--) {
-      var change = allChanges[v]
+    // Iterate over a deduplicated SNAPSHOT of the tracked changes
+    // rather than over allChanges directly. undoFix splices every
+    // entry matching a fingerprint+family from allChanges in one call —
+    // so undoing an escalated fix (e.g. add-1 -> add-2, two entries)
+    // removes more than one element, which would break a live
+    // index-based walk and read past the shrunken array end. The
+    // snapshot keeps one record per fingerprint+family (the latest,
+    // highest-value escalation step), so each fix is verified exactly
+    // once and undoFix can mutate allChanges freely underneath us.
+    var sweepSeen = {}
+    var sweepTargets = []
+    for (var sd = allChanges.length - 1; sd >= 0; sd--) {
+      var sdFam = /^(add|save)-/.test(allChanges[sd].className) ? 'vs' : 'ls'
+      var sdKey = allChanges[sd].fingerprint + '|' + sdFam
+      if (sweepSeen[sdKey]) continue
+      sweepSeen[sdKey] = true
+      sweepTargets.push(allChanges[sd])
+    }
+
+    for (var v = 0; v < sweepTargets.length; v++) {
+      var change = sweepTargets[v]
       var issueEl = change.issueElement
       if (!issueEl) continue
 
@@ -1409,20 +2251,192 @@ function detectAndFix () {
 
       if (issuePresent) {
         console.log('REFINE_DEBUG|SWEEP_UNDO|' + change.className + '|' + reason + '|page=' + change.pageNum)
-        undoFix(fixEl)
+        // Undo only the class family this change belongs to, so a
+        // coexisting fix of the other family on the same element
+        // is left intact.
+        undoFix(fixEl, /^(add|save)-/.test(change.className) ? 'vs' : 'ls')
         undone++
+        // Abandon this issue so the next resume pass does not simply
+        // re-apply the identical fix the sweep just removed, which
+        // would oscillate (undo -> re-detect -> re-apply -> undo) and
+        // burn the settle-pass budget without converging. The fix
+        // failed verification on the settled layout, so re-trying it
+        // unchanged cannot help.
+        skippedElements.push({ el: issueEl, type: reason })
       } else {
-        console.log('REFINE_DEBUG|SWEEP_OK|' + change.className + '|' + reason + '|page=' + change.pageNum)
+        // Do-no-harm check on the SETTLED layout: the fix resolved its
+        // own issue, but did it relocate the problem? Compare this fix's
+        // wrapper chain against the pre-fix baseline captured when the
+        // fix was recorded. Any lone-line issue present now but absent
+        // from the baseline (on an element other than the resolved
+        // target, and not one we have deliberately given up on) was
+        // introduced by this fix — it merely moved the blemish elsewhere
+        // in the same chapter. Because the sweep runs only once fixing
+        // has stalled, this layout is final: there are no transient
+        // issues to misjudge, so we can safely undo the relocating fix.
+        var relocated = false
+        var relocatedInfo = null
+        var relocatedIdx = -1
+        var relocatedIssue = null
+        var relocatedChain = null
+        // Every distinct issue this fix relocated into its chain, and the
+        // highest severity among them. We scan ALL of them (rather than
+        // stopping at the first) so the severity-aware decision below can
+        // compare the WORST relocated blemish against the issue this fix
+        // resolved — accepting the fix only if even the worst is milder.
+        var relocatedList = []
+        var worstRelocatedSeverity = 0
+        if (change.chainBaseline) {
+          var sweepChain = getWrapperChain(issueEl)
+          var baseIssues = change.chainBaseline[sweepChain] || {}
+          var targetFp = computeFingerprint(issueEl)
+          for (var ci = 0; ci < paragraphInfos.length; ci++) {
+            var cInfo = paragraphInfos[ci]
+            if (cInfo.wrapperChain !== sweepChain) continue
+            var cIssue = infoIssue(cInfo)
+            if (!cIssue) continue
+            var cFp = computeFingerprint(cInfo.element)
+            if (cFp === targetFp) continue
+            if (baseIssues[cFp]) continue // pre-existing, not caused by this fix
+            if (isSkippedFor(cInfo.element, cIssue.type)) continue // deliberately abandoned
+            relocated = true
+            relocatedList.push({ info: cInfo, idx: ci, issue: cIssue })
+            // Keep the worst (highest-severity) one as the shift target and
+            // the yardstick for the net-win test.
+            if (cIssue.severity > worstRelocatedSeverity) {
+              worstRelocatedSeverity = cIssue.severity
+              relocatedInfo = cInfo
+              relocatedIdx = ci
+              relocatedIssue = cIssue
+              relocatedChain = sweepChain
+            }
+          }
+        }
+
+        if (relocated) {
+          // The fix relocated the blemish. If the relocated problem is
+          // a lone-line-top, prefer ADDING a downward shift
+          // (add-N on the chapter opener) over undoing this fix: the
+          // shift can absorb the lone-line-top while keeping the line the
+          // original fix saved, so we don't simply hand the problem
+          // back. The add-N is recorded as its own change, so if it
+          // re-creates the original issue a later sweep will undo IT —
+          // protecting against an add that merely cancels a tighten.
+          // We mark the lone-line-top as skipped so a subsequent sweep won't
+          // keep re-triggering this branch (which would loop); if the
+          // shift fails to clear it, the lone-line-top just remains.
+          var shifted = false
+          if (relocatedIssue.type === 'lone-line-top') {
+            shifted = tryVerticalShift(
+              relocatedInfo.element, relocatedIdx, relocatedIssue.type,
+              relocatedChain, relocatedInfo.lastPage, relocatedIssue.severity
+            )
+          }
+          if (shifted) {
+            skippedElements.push({ el: relocatedInfo.element, type: relocatedIssue.type })
+            shiftedInSweep++
+            console.log('REFINE_DEBUG|SWEEP_SHIFT|' + change.className + '|' + reason + '->relocates|lone-line-top-page=' + relocatedInfo.lastPage + '|added=add-1')
+          } else if (worstRelocatedSeverity < change.severity) {
+            // Severity-aware relocation gate. The fix resolved its own
+            // issue (severity change.severity) and every blemish it
+            // relocated is strictly milder (worst = worstRelocatedSeverity).
+            // That is a net improvement — for example trading a
+            // high-severity lone-line-top for a low-severity
+            // lone-line-bottom — so we KEEP the fix and accept the milder
+            // blemish(es) rather than handing the worse problem back.
+            // This is the mirror image of the same-element regression
+            // check, which REJECTS a fix when the new issue is the same or
+            // worse. We mark each relocated issue as skipped so a resume
+            // pass does not chase it and undo this beneficial fix, which
+            // would oscillate against this sweep.
+            for (var rl = 0; rl < relocatedList.length; rl++) {
+              skippedElements.push({ el: relocatedList[rl].info.element, type: relocatedList[rl].issue.type })
+            }
+            console.log('REFINE_DEBUG|SWEEP_KEEP|' + change.className + '|' + reason + '->relocates|resolved-sev=' + change.severity + '|relocated-sev=' + worstRelocatedSeverity + '|page=' + change.pageNum)
+          } else {
+            console.log('REFINE_DEBUG|SWEEP_UNDO|' + change.className + '|' + reason + '->relocates|page=' + change.pageNum)
+            undoFix(fixEl, /^(add|save)-/.test(change.className) ? 'vs' : 'ls')
+            undone++
+            // Accept the original issue rather than relocating it, and
+            // abandon it so resume passes do not re-apply the same
+            // relocating fix (which would oscillate against this sweep).
+            skippedElements.push({ el: issueEl, type: reason })
+          }
+        } else {
+          console.log('REFINE_DEBUG|SWEEP_OK|' + change.className + '|' + reason + '|page=' + change.pageNum)
+        }
       }
     }
 
-    console.log('REFINE_DEBUG|SWEEP_END|undone=' + undone + '|remaining=' + allChanges.length)
+    console.log('REFINE_DEBUG|SWEEP_END|undone=' + undone + '|shifted=' + shiftedInSweep + '|remaining=' + allChanges.length)
 
-    if (undone > 0) {
-      // Layout changed from undos — give one more pass for things
-      // to settle, then resume fixing if budget remains.
+    if (undone > 0 || shiftedInSweep > 0) {
+      // Layout changed from undos or newly added sweep shifts — give one
+      // more pass for things to settle, then resume fixing if budget
+      // remains. Re-arm the sweep so this is not the last word: undoing
+      // a fix (or adding a salvage shift) reflows the chain, which can
+      // re-expose issues and trigger fresh fixes on the resume passes.
+      // Those new fixes must themselves be verified, so we must run at
+      // least one more sweep once fixing stalls again. Leaving sweepDone
+      // true here (the old behaviour) let late fixes applied after an
+      // undo-only sweep escape verification entirely, so a tighten that
+      // relocated a problem could survive into the final PDF. The pass
+      // budget and postSweepStalled guard prevent infinite loops; the
+      // recursion terminates when a sweep finally makes no changes.
+      sweepDone = false
       Prince.registerPostLayoutFunc(detectAndFix)
       return
+    }
+
+    // --- Effectiveness pruning (letter-spacing IALs only) ---
+    // The sweep has settled, so the layout is final and stable. Drop
+    // any tighten/loosen class that made no difference: if its target
+    // paragraph now has the same line count AND the same measure as
+    // before the class was applied, the class is inert and removing it
+    // cannot change any line break. We never prune vertical-shift
+    // (add/save) classes, whose normal successful behaviour is to move
+    // a block without changing any line count. The measure check is
+    // essential: a paragraph that reflowed around a floated element
+    // (e.g. a sidebar QR code) can have an unchanged line count by
+    // coincidence, and there removing the IAL might shift a line, so a
+    // changed measure blocks the prune. Pruning removes an inert class,
+    // which by definition cannot change the layout, so no re-layout or
+    // re-arm is needed; running this on every settle also catches inert
+    // fixes that resume passes added after an earlier settle.
+    var MEASURE_EPSILON = 1 // points; absorbs sub-pixel variation
+    var pruneTargets = []
+    var seenPrune = {}
+    for (var pc = 0; pc < allChanges.length; pc++) {
+      var pch = allChanges[pc]
+      // Letter-spacing classes only; never vertical shifts.
+      if (/^(add|save)-/.test(pch.className)) continue
+      // One decision per element (escalation leaves several entries).
+      if (seenPrune[pch.fingerprint]) continue
+      seenPrune[pch.fingerprint] = true
+      var base = lsBaselines[pch.fingerprint]
+      if (!base || !pch.fixElement) continue
+      var now = measureElement(pch.fixElement)
+      if (!now) continue
+      if (now.lines === base.lines &&
+          Math.abs(now.measure - base.measure) <= MEASURE_EPSILON) {
+        var liveInfo = getTrackingInfo(pch.fixElement)
+        pruneTargets.push({
+          el: pch.fixElement,
+          className: liveInfo ? liveInfo.fullClass : pch.className,
+          pageNum: pch.pageNum,
+          lines: base.lines,
+          measure: base.measure
+        })
+      }
+    }
+    for (var pt = 0; pt < pruneTargets.length; pt++) {
+      // undoFix strips the letter-spacing class and removes its change
+      // entries (including any escalation steps) for this element.
+      undoFix(pruneTargets[pt].el, 'ls')
+      console.log('REFINE_DEBUG|PRUNE_INERT|' + pruneTargets[pt].className +
+        '|page=' + pruneTargets[pt].pageNum +
+        '|lines=' + pruneTargets[pt].lines +
+        '|measure=' + Math.round(pruneTargets[pt].measure))
     }
   }
 
@@ -1451,13 +2465,18 @@ Prince.addEventListener('complete', function () {
     return
   }
 
-  // Deduplicate by fingerprint — keep only the last (escalated)
-  // entry for each element so the Node.js side applies the final class.
+  // Deduplicate by fingerprint AND class family — keep only the
+  // last (escalated) entry for each element within each family, so
+  // an element may keep one letter-spacing class and one vertical-
+  // shift class while escalation steps within a family collapse to
+  // their final value.
   var seen = {}
   var finalChanges = []
   for (var d = allChanges.length - 1; d >= 0; d--) {
-    if (!seen[allChanges[d].fingerprint]) {
-      seen[allChanges[d].fingerprint] = true
+    var fam = /^(add|save)-/.test(allChanges[d].className) ? 'vs' : 'ls'
+    var key = allChanges[d].fingerprint + '|' + fam
+    if (!seen[key]) {
+      seen[key] = true
       finalChanges.unshift(allChanges[d])
     }
   }

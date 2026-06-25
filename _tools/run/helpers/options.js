@@ -201,6 +201,14 @@ const options = {
     default: false,
     defaultDescription: 'false',
     type: 'boolean'
+  },
+  'max-shift': {
+    description: 'Maximum whole-line vertical shift (add-n/save-n) applied to chapter openers during refine',
+    alias: 'ms',
+    default: 2,
+    defaultDescription: '2',
+    type: 'number',
+    nargs: 1
   }
 }
 

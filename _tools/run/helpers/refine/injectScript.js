@@ -7,14 +7,26 @@ const fsPath = require('path')
 // Inject the refine script into the merged HTML file.
 // The script is added as an inline <script> in the <head>,
 // before any other scripts, so it runs first.
-function injectRefineScript (mergedHtmlPath) {
+//
+// options.maxShift (optional): caps add-N/save-N vertical shifts.
+// Injected as REFINE_MAX_SHIFT_LINES ahead of the script.
+function injectRefineScript (mergedHtmlPath, options) {
+  options = options || {}
   const scriptPath = fsPath.join(__dirname, 'prince-refine.prince')
   const scriptContent = fs.readFileSync(scriptPath, 'utf8')
 
   let html = fs.readFileSync(mergedHtmlPath, 'utf8')
 
+  // Prepend any configuration overrides as global vars so the
+  // refine script can read them before it runs.
+  let config = ''
+  if (typeof options.maxShift === 'number' && !isNaN(options.maxShift)) {
+    config += 'var REFINE_MAX_SHIFT_LINES = ' + options.maxShift + ';\n'
+  }
+
   // Build the script tag
   const scriptTag = '<script data-refine="true">\n' +
+    config +
     scriptContent + '\n' +
     '</script>'
 
@@ -84,6 +96,8 @@ function injectHighlightStyles (mergedHtmlPath) {
   const styleTag = '<style data-refine-highlight="true">\n' +
     '[class*="tighten-"] { background-color: #d6eaff; } /* pale blue for tightened */\n' +
     '[class*="loosen-"] { background-color: #ffedcc; } /* pale orange for loosened */\n' +
+    '[class*="add-"] { background-color: #d8f0d8; } /* pale green for added space (lone-line-bottom or lone-line-top fix) */\n' +
+    '[class*="save-"] { background-color: #e7dcf5; } /* pale lavender for saved space (lone-line-top fix) */\n' +
     '.unfixed-refinement-issue { background-color: #ffd6d6; } /* pale pink for unfixed issues */\n' +
     '</style>'
 
