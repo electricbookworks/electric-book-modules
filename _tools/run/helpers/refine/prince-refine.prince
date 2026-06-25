@@ -1964,6 +1964,29 @@ function detectAndFix () {
     return best
   }
 
+  // A "coupled straddle": a 2-line paragraph split across a single page
+  // break — one line stranded at the bottom of its first page, the other
+  // at the top of the next. Its lone-line-bottom and lone-line-top are the
+  // SAME two lines, so one line-shift (in either direction) reunites them:
+  // fixing either half fixes both. Recognising this lets the lone-line-top
+  // handler own the single fix while the lone-line-bottom handler defers,
+  // so the chain never spends two line-saves where one suffices (which
+  // would over-shoot and strand fresh lone lines further down the chain).
+  function isCoupledStraddle (info) {
+    if (info.pageNums.length < 2) return false
+    if (info.totalLines !== 2) return false
+    // The two pages must be consecutive (a single break between them).
+    if (info.lastPage !== info.firstPage + 1) return false
+    var firstBoxes = info.byPage[info.firstPage]
+    var firstLines = 0
+    for (var a = 0; a < firstBoxes.length; a++) firstLines += countLines(firstBoxes[a])
+    if (firstLines !== 1) return false
+    var lastBoxes = info.byPage[info.lastPage]
+    var lastLines = 0
+    for (var b = 0; b < lastBoxes.length; b++) lastLines += countLines(lastBoxes[b])
+    return lastLines === 1
+  }
+
   // True if the wrapper chain still has an actionable issue strictly
   // more severe than `threshold` on some element other than `excludeEl`.
   // "Actionable" means not already given up (skipped) for that type, so
@@ -2014,7 +2037,14 @@ function detectAndFix () {
 
         // Apply a fix if we can (one fix per wrapper chain per pass)
         var chain = info.wrapperChain
-        if (canFixInChain(chain) && chainHasHigherActionableIssue(chain, severity, el)) {
+        if (isCoupledStraddle(info)) {
+          // Coupled-straddle guard: this paragraph's lone-line-bottom and
+          // lone-line-top are the same two lines split across one break.
+          // Defer the fix to the lone-line-top handler below (it tightens
+          // upstream once); fixing the bottom here as well would save a
+          // second line the chain does not need.
+          console.log('REFINE_DEBUG|DEFERRED|lone-line-bottom|page=' + pn + '|severity=' + severity + '|reason=coupled-straddle')
+        } else if (canFixInChain(chain) && chainHasHigherActionableIssue(chain, severity, el)) {
           // Sequencing gate (principle 1): a lone-line-bottom is the least
           // severe lone-line issue (sev 2–3). Don't chase it while any
           // strictly-more-severe issue (a lone-line-top, sev 4–7) is still
