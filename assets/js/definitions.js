@@ -178,13 +178,6 @@ function ebDefinitionsHideDescriptions () {
   const descriptions = document.querySelectorAll('.definition-description-hover')
 
   descriptions.forEach(function (description) {
-    // If we mouseleave description, hide it
-    // (mouseout also fires on mouseout of children, so we use mouseleave)
-    description.addEventListener('mouseleave', function () {
-      setTimeout(function () {
-        description.classList.add('visuallyhidden')
-      }, 1000)
-    })
     const tabbableElements = description.querySelectorAll('em.definition-cross-reference a, button.close')
     // Close definition when Esc is pressed
     window.addEventListener('keydown', function (event) {
