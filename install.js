@@ -8,8 +8,8 @@ const path = require('path')
  * Syncs folders to the parent package and creates .gitignore files
  */
 
-// Folders to sync to parent package
-const FOLDERS_TO_SYNC = ['_tools', '_webpack', '_docs']
+// Folders to sync to parent package.
+const FOLDERS_TO_SYNC = ['_tools', '_webpack']
 
 let moduleRoot
 let parentRoot
