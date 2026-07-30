@@ -1,6 +1,5 @@
 import SVGInject from '@iconfu/svg-inject'
 import { ebAccordionIsPageOff } from './accordion'
-const settings = process.env.settings
 
 const ebLazyLoadImages = function (lazyImages) {
   if (!Array.prototype.forEach) return
@@ -38,15 +37,11 @@ const ebLazyLoadImages = function (lazyImages) {
 }
 
 export default function ebLazyLoad () {
-  if (settings.web.images.lazyload) {
-    // if we're not on a unit, lazy load all images
+  if (process.env.settings[process.env.output]?.images?.lazyload) {
     if ('querySelectorAll' in document) {
-      const thisIsNotAChapter = !(document.querySelector('.wrapper').classList.contains('default-page'))
-      const thisIsFrontmatter = (document.querySelector('.wrapper').classList.contains('frontmatter-page'))
-      const thisHasNoH2s = (document.querySelector('h2') === null)
-      const thisIsEndmatter = (document.querySelector('.wrapper').classList.contains('endmatter-page'))
-      const thisIsALeibniz = (document.querySelector('.wrapper').classList.contains('leibniz'))
-      if (thisIsNotAChapter || thisIsFrontmatter || thisHasNoH2s || thisIsEndmatter || thisIsALeibniz || ebAccordionIsPageOff()) {
+      // accordions lazy load when they open
+      // so only lazy load images on non-accordion pages
+      if (ebAccordionIsPageOff()) {
         const lazyImages = document.querySelectorAll('[data-src]')
         ebLazyLoadImages(lazyImages)
       }
