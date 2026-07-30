@@ -82,7 +82,7 @@ Add this `postyalc` property to `scripts` inside the consuming template's packag
 }
 ```
 
-To push changes to the book server template consuming it, run this inside this repo:
+To push changes to the book template consuming it, run this inside this repo:
 
 ```
 yalc push
@@ -95,3 +95,5 @@ npm run watch
 ```
 
 This will have no effect on deployments external to your local machine. To publish all your changes as a new release, follow the instructions under 'Publishing changes' above.
+
+When you're done, run `yalc remove @electricbookworks/electric-book-modules` in the template to restore the GitHub-tag dependency and clean up `.yalc`/`yalc.lock`.
