@@ -1,5 +1,21 @@
 import { ebToggleClickout } from './utilities'
 const settings = process.env.settings
+const config = process.env.config
+
+// Prefix for the landing-page accordion open/closed preferences we store in
+// localStorage. It has two parts:
+//   1. A version tag ('v2'). Bump it (v2 -> v3) to invalidate every previously
+//      stored preference at once — old keys stop matching, so getItem falls back
+//      to the project default. Used when a past bug wrote incorrect values.
+//   2. The book's baseurl (e.g. '/insights'), inlined at build time. Several
+//      books can share one origin (e.g. books.core-econ.org/insights,
+//      books.core-econ.org/the-economy, ...) and localStorage is per-origin, so
+//      without this per-book scope their preferences would overwrite each other.
+// Prefer the live baseurl; fall back to the project directory name (inlined at
+// build time) so local dev builds, which all share localhost with an empty
+// baseurl, still get a unique per-project scope.
+const bookScope = (config && config.baseurl) || process.env.projectName || ''
+const accordionStoragePrefix = 'accordion-v2-' + bookScope + '-'
 
 /*
 ACCORDION BEHAVIOUR ON THE LANDING PAGE
@@ -11,7 +27,7 @@ function ebLandingPageAccordionAction (parentClass, parentSection, parentHeading
   upArrow.classList.toggle('visuallyhidden')
   downArrow.classList.toggle('visuallyhidden')
 
-  const storageKey = 'accordion-' + parentHeading.id
+  const storageKey = accordionStoragePrefix + parentHeading.id
 
   if (parentSection.classList.contains(parentClass + '-open')) {
     window.localStorage.setItem(storageKey, 'open')
@@ -21,14 +37,21 @@ function ebLandingPageAccordionAction (parentClass, parentSection, parentHeading
 }
 
 function ebLandingPageAccordionStart (parentClass, parentSection, parentHeading, upArrow, downArrow) {
-  // Get the default visual-TOC position
+  // Get the project's default visual-TOC position (from _data/settings.yml)
   const defaultPosition = settings[process.env.output]['landing-page']['visual-toc-accordion-default'] === 'open' ? 'open' : 'closed'
 
-  // Look at localStorage to see whether the user left the page in non-default state
-  const storageKey = 'accordion-' + parentHeading.id
+  // The desired state is the user's saved choice from a previous visit,
+  // or the project default when they haven't set one yet.
+  const storageKey = accordionStoragePrefix + parentHeading.id
+  const desiredPosition = window.localStorage.getItem(storageKey) || defaultPosition
 
-  // If the user changed a section position last time, do that again
-  if (window.localStorage.getItem(storageKey) !== defaultPosition) {
+  // The current state is whatever the server-rendered markup shipped.
+  const currentPosition = parentSection.classList.contains(parentClass + '-open') ? 'open' : 'closed'
+
+  // Only toggle when the desired state differs from what's already on screen.
+  // Comparing against the current state (rather than blindly toggling) avoids
+  // flipping the section on a first visit, when no preference is stored.
+  if (desiredPosition !== currentPosition) {
     ebLandingPageAccordionAction(parentClass, parentSection, parentHeading, upArrow, downArrow)
   }
 }

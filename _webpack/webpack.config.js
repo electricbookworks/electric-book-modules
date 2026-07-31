@@ -108,7 +108,11 @@ module.exports = {
     }),
     new webpack.DefinePlugin({
       'process.env.output': JSON.stringify(process.env.output || 'web'),
-      'process.env.build': JSON.stringify(ebBuild)
+      'process.env.build': JSON.stringify(ebBuild),
+      // Basename of the project directory (e.g. 'core-insights-2'), used as a
+      // per-project fallback for scoping browser storage when no baseurl is set
+      // (e.g. local dev, where every project is served from localhost).
+      'process.env.projectName': JSON.stringify(path.basename(process.cwd()))
     })
   ],
   devtool: process.env.debug === 'true' ? 'eval-source-map' : false,
