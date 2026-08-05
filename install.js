@@ -32,6 +32,15 @@ async function install () {
     moduleRoot = __dirname
     parentRoot = path.resolve(moduleRoot, '../../..')
 
+    // Skip syncing when this package is not installed as a dependency
+    // (e.g. developing the repo itself). Dependency installs live under
+    // node_modules (npm/pnpm) or .yalc (yalc); without either ancestor the
+    // parent-root fallback resolves to the drive root, which is not writable.
+    if (!moduleRoot.includes('node_modules') && !moduleRoot.includes('.yalc')) {
+      console.log('electric-book-modules: not installed as a dependency; skipping module sync.')
+      return
+    }
+
     // Standard npm install: node_modules/@electricbookworks/electric-book-modules
     if (moduleRoot.includes('node_modules')) {
       // Find the node_modules directory and get the project root

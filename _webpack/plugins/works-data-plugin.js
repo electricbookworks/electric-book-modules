@@ -1,10 +1,7 @@
 const fs = require('fs')
 const path = require('path')
 const yaml = require('js-yaml')
-const webpack = require('webpack')
 
-// Get the ConstDependency class
-const ConstDependency = webpack.dependencies.ConstDependency
 const pluginName = 'WorksDataPlugin'
 
 class WorksDataPlugin {
@@ -23,6 +20,11 @@ class WorksDataPlugin {
   }
 
   apply (compiler) {
+    // Use the ConstDependency from the same webpack instance that is running
+    // the build. Requiring 'webpack' directly can resolve a different copy
+    // (e.g. under yalc), causing cross-instance ConstDependency errors.
+    const ConstDependency = compiler.webpack.dependencies.ConstDependency
+
     // Generate works data
     compiler.hooks.beforeCompile.tapAsync(pluginName, async (params, callback) => {
       try {
@@ -44,7 +46,8 @@ class WorksDataPlugin {
           // Replace the expression `process.env.works`
           // with the *content* of this.definition.
           const dep = new ConstDependency(this.definition, expr.range)
-          dep.loc = expr.loc
+          // getLocation exists on some webpack versions, expr.loc on others.
+          dep.loc = parser.getLocation ? parser.getLocation(expr) : expr.loc
           parser.state.current.addDependency(dep)
           return true // Stop parsing this branch
         })
