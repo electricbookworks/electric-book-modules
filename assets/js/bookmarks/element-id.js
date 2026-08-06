@@ -11,8 +11,10 @@ function ebBookmarksElementID (element) {
     return element.id
   } else if (window.location.hash) {
     // If for some reason the element has no ID,
-    // return the hash of the current window location.
-    return window.location.hash
+    // return the current window location's hash without the leading '#',
+    // so the result is a bare element ID (as document.getElementById and
+    // callers that prepend '#' both expect).
+    return window.location.hash.replace(/^#/, '')
   } else {
     // And in desperation, use the first element
     // with an ID on the page.
