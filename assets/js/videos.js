@@ -117,6 +117,51 @@ function ebVideoMakeIframe (videoElement, videoTitle, videoURL) {
 // and initiates the YT object
 // }
 
+// Track the YouTube IFrame API loading state so we request the script
+// only once, however many YouTube videos are on the page.
+let ebYouTubeAPIRequested = false
+let ebYouTubeAPICallbacks = []
+
+// Load the YouTube IFrame API on demand, then run the callback.
+// The API defines the global `YT` object. Calling `YT.ready` (or `new
+// YT.Player`) before the script has loaded throws "YT is not defined",
+// which aborts the rest of main.js and, in turn, stops image lazyloading.
+// So we inject the API script ourselves and wait for the API's
+// `onYouTubeIframeAPIReady` callback before touching `YT`.
+function ebLoadYouTubeIframeAPI (callback) {
+  // If the API is already available, use it immediately.
+  if (window.YT && window.YT.Player) {
+    callback()
+    return
+  }
+
+  // Otherwise queue the callback to run once the API has loaded.
+  ebYouTubeAPICallbacks.push(callback)
+
+  // Only inject the API script once per page.
+  if (!ebYouTubeAPIRequested) {
+    ebYouTubeAPIRequested = true
+
+    const tag = document.createElement('script')
+    tag.src = 'https://www.youtube.com/iframe_api'
+
+    const firstScriptTag = document.getElementsByTagName('script')[0]
+    if (firstScriptTag && firstScriptTag.parentNode) {
+      firstScriptTag.parentNode.insertBefore(tag, firstScriptTag)
+    } else {
+      document.head.appendChild(tag)
+    }
+
+    // The API calls this global function when it has finished loading.
+    window.onYouTubeIframeAPIReady = function () {
+      ebYouTubeAPICallbacks.forEach(function (queuedCallback) {
+        queuedCallback()
+      })
+      ebYouTubeAPICallbacks = []
+    }
+  }
+}
+
 function ebVideoUseTheYoutubeIFrameAPI (videoId, videoLanguage, videoSubtitles,
   videoTitle, videoTimestamp, currentVideo) {
   function onPlayerStateChange (event) {
@@ -129,7 +174,7 @@ function ebVideoUseTheYoutubeIFrameAPI (videoId, videoLanguage, videoSubtitles,
   }
 
   let player
-  YT.ready(function () {
+  ebLoadYouTubeIframeAPI(function () {
     player = new YT.Player(videoId, {
       videoId,
       playerVars: {
