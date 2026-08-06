@@ -117,6 +117,72 @@ function ebVideoMakeIframe (videoElement, videoTitle, videoURL) {
 // and initiates the YT object
 // }
 
+// Track the YouTube IFrame API loading state so we request the script
+// only once, however many YouTube videos are on the page.
+let ebYouTubeAPIRequested = false
+let ebYouTubeAPICallbacks = []
+
+// Load the YouTube IFrame API on demand, then run the callback.
+// The API defines the global `YT` object. Calling `YT.ready` (or `new
+// YT.Player`) before the script has loaded throws "YT is not defined",
+// which aborts the rest of main.js and, in turn, stops image lazyloading.
+// So we make sure the API is available before touching `YT`.
+//
+// A project may also load the API itself in its page <head> (e.g. CORE's
+// head-elements.html). We handle that case too, so we never inject a
+// duplicate script or clobber an existing onYouTubeIframeAPIReady callback.
+function ebLoadYouTubeIframeAPI (callback) {
+  // If the API is already fully available, use it immediately.
+  if (window.YT && window.YT.Player) {
+    callback()
+    return
+  }
+
+  // If the base YT object exists but the player isn't ready yet, use its
+  // own ready queue, which fires every registered callback. This is safe
+  // to call alongside other code that also waits for the API.
+  if (window.YT && typeof window.YT.ready === 'function') {
+    window.YT.ready(callback)
+    return
+  }
+
+  // Otherwise the API script hasn't finished loading. Queue our callback.
+  ebYouTubeAPICallbacks.push(callback)
+
+  // Make sure the API script is requested exactly once.
+  if (!ebYouTubeAPIRequested) {
+    ebYouTubeAPIRequested = true
+
+    // Only inject our own copy if the page isn't already loading one
+    // (e.g. from a project's head-elements.html).
+    if (!document.querySelector('script[src*="youtube.com/iframe_api"]')) {
+      const tag = document.createElement('script')
+      tag.src = 'https://www.youtube.com/iframe_api'
+
+      const firstScriptTag = document.getElementsByTagName('script')[0]
+      if (firstScriptTag && firstScriptTag.parentNode) {
+        firstScriptTag.parentNode.insertBefore(tag, firstScriptTag)
+      } else {
+        document.head.appendChild(tag)
+      }
+    }
+
+    // The API calls this global function once it has loaded. Preserve any
+    // callback already registered (by a project or earlier code) and run
+    // our queued callbacks too.
+    const ebPreviousOnYouTubeIframeAPIReady = window.onYouTubeIframeAPIReady
+    window.onYouTubeIframeAPIReady = function () {
+      if (typeof ebPreviousOnYouTubeIframeAPIReady === 'function') {
+        ebPreviousOnYouTubeIframeAPIReady()
+      }
+      ebYouTubeAPICallbacks.forEach(function (queuedCallback) {
+        queuedCallback()
+      })
+      ebYouTubeAPICallbacks = []
+    }
+  }
+}
+
 function ebVideoUseTheYoutubeIFrameAPI (videoId, videoLanguage, videoSubtitles,
   videoTitle, videoTimestamp, currentVideo) {
   function onPlayerStateChange (event) {
@@ -129,7 +195,7 @@ function ebVideoUseTheYoutubeIFrameAPI (videoId, videoLanguage, videoSubtitles,
   }
 
   let player
-  YT.ready(function () {
+  ebLoadYouTubeIframeAPI(function () {
     player = new YT.Player(videoId, {
       videoId,
       playerVars: {
