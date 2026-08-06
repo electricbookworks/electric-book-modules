@@ -1,10 +1,7 @@
 const fs = require('fs')
 const path = require('path')
 const yaml = require('js-yaml')
-const webpack = require('webpack')
 
-// Get the ConstDependency class
-const ConstDependency = webpack.dependencies.ConstDependency
 const pluginName = 'ConfigMergePlugin'
 
 class ConfigMergePlugin {
@@ -21,6 +18,11 @@ class ConfigMergePlugin {
   }
 
   apply (compiler) {
+    // Use the ConstDependency from the same webpack instance that is running
+    // the build. Requiring 'webpack' directly can resolve a different copy
+    // (e.g. under yalc), causing cross-instance ConstDependency errors.
+    const ConstDependency = compiler.webpack.dependencies.ConstDependency
+
     // Load and merge config files before compilation
     compiler.hooks.beforeCompile.tapAsync(pluginName, async (params, callback) => {
       try {
@@ -48,7 +50,8 @@ class ConfigMergePlugin {
           // Replace the expression `process.env.config`
           // with the *content* of this.definition.
           const dep = new ConstDependency(this.definition, expr.range)
-          dep.loc = expr.loc
+          // getLocation exists on some webpack versions, expr.loc on others.
+          dep.loc = parser.getLocation ? parser.getLocation(expr) : expr.loc
           parser.state.current.addDependency(dep)
           return true // Stop parsing this branch
         })

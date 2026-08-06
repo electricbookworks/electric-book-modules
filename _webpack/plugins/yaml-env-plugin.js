@@ -1,10 +1,7 @@
 const fs = require('fs')
 const path = require('path')
 const yaml = require('js-yaml')
-const webpack = require('webpack')
 
-// Get the ConstDependency class for variable replacement
-const ConstDependency = webpack.dependencies.ConstDependency
 const pluginName = 'YamlEnvPlugin'
 
 class YamlEnvPlugin {
@@ -57,6 +54,11 @@ class YamlEnvPlugin {
   }
 
   apply (compiler) {
+    // Use the ConstDependency from the same webpack instance that is running
+    // the build. Requiring 'webpack' directly can resolve a different copy
+    // (e.g. under yalc), causing cross-instance ConstDependency errors.
+    const ConstDependency = compiler.webpack.dependencies.ConstDependency
+
     // Hook into beforeCompile to reload data on every build
     compiler.hooks.beforeCompile.tapAsync(pluginName, (params, callback) => {
       try {
@@ -86,7 +88,8 @@ class YamlEnvPlugin {
             // Because this.definitions is updated in `beforeCompile`,
             // this will always use the latest data.
             const dep = new ConstDependency(this.definitions[key], expr.range)
-            dep.loc = expr.loc
+            // getLocation exists on some webpack versions, expr.loc on others.
+            dep.loc = parser.getLocation ? parser.getLocation(expr) : expr.loc
             parser.state.current.addDependency(dep)
             // Stop parsing this expression branch
             return true
