@@ -10,6 +10,26 @@ const fsPromises = require('fs/promises')
 // Local helpers
 const htmlFilePaths = require('../paths/htmlFilePaths.js')
 
+// HTML5 ignores the self-closing slash on non-void elements such as
+// `<script src="..."/>` or `<iframe .../>`. When the HTML parser meets
+// one of these, the element stays open and every subsequent piece of
+// markup (including the <body> and its `.wrapper`) is consumed as the
+// element's raw text content. The result is an empty <body>, a missing
+// `.wrapper`, and `mergedBody.append(null)` writing the literal string
+// "null" once per merged file. We normalise these XHTML-style tags into
+// explicit open/close pairs before parsing so JSDOM builds the DOM
+// correctly.
+function normaliseSelfClosingTags (html) {
+  const nonVoidElements = [
+    'script', 'iframe', 'textarea', 'title', 'style', 'noscript'
+  ]
+  const pattern = new RegExp(
+    '<(' + nonVoidElements.join('|') + ')\\b([^>]*?)\\s*/>',
+    'gi'
+  )
+  return html.replace(pattern, '<$1$2></$1>')
+}
+
 // Make IDs in HTML unique by prefixing them
 // with the slug of the filename, and updating
 // any links that point to them.
@@ -127,63 +147,63 @@ async function merge (argv) {
   console.log('Merging HTML files ...')
   const filePaths = await htmlFilePaths(argv)
 
-  return new Promise(function (resolve, reject) {
-    try {
-      let fileCounter = 1
-      let mergedDom
+  let destination
+  if (argv.language) {
+    destination = fsPath.normalize(process.cwd() +
+      '/_site/' + argv.book + '/' + argv.language + '/merged.html')
+  } else {
+    destination = fsPath.normalize(process.cwd() +
+      '/_site/' + argv.book + '/merged.html')
+  }
 
-      let destination
-      if (argv.language) {
-        destination = fsPath.normalize(process.cwd() +
-          '/_site/' + argv.book + '/' + argv.language + '/merged.html')
+  let mergedDom
+
+  // Process files sequentially so that ordering, the merged DOM and the
+  // serialized output are deterministic. (A previous `forEach(async ...)`
+  // loop relied on microtask ordering and resolved before the file had
+  // finished writing.)
+  for (let i = 0; i < filePaths.length; i += 1) {
+    const filePath = filePaths[i]
+
+    // Read and normalise the HTML before parsing it.
+    const html = normaliseSelfClosingTags(fs.readFileSync(filePath, 'utf8'))
+    let dom = new JSDOM(html)
+
+    // Update the IDs and links
+    const filename = fsPath.basename(filePath)
+    dom = await updateIDs(filename, dom, argv)
+
+    if (i === 0) {
+      // Use the first file as our base, to which we append the rest.
+      mergedDom = dom
+    } else {
+      // For later files we only want the .wrapper,
+      // appended to the base file's body element.
+      const newContent = dom.window.document.querySelector('.wrapper')
+      const mergedBody = mergedDom.window.document.querySelector('body')
+
+      if (newContent && mergedBody) {
+        mergedBody.append(newContent)
       } else {
-        destination = fsPath.normalize(process.cwd() +
-          '/_site/' + argv.book + '/merged.html')
+        console.log('Warning: no .wrapper found in ' + filename +
+          ', so it was skipped in the merged HTML.')
       }
-
-      filePaths.forEach(async function (filePath) {
-        // Parse the HTML
-        let dom = new JSDOM(fs.readFileSync(filePath, 'utf8'))
-
-        // Update the IDs and links
-        const filename = fsPath.basename(filePath)
-        dom = await updateIDs(filename, dom, argv)
-
-        // If this is the first file, we'll use it as our base,
-        // to which we'll append the remaining files.
-        if (fileCounter === 1) {
-          mergedDom = dom
-        } else {
-          // If this is not the first path, we only want its .wrapper,
-          // so append that to the first file's body element.
-          const newContent = dom.window.document.querySelector('.wrapper')
-          const mergedBody = mergedDom.window.document.querySelector('body')
-          mergedBody.append(newContent)
-        }
-
-        // When we've processed all the files,
-        // write the serialized merged HTML to a file.
-        // If this is not the last file, remove the script tag
-        // that loads main.dist.js, so it doesn't load multiple times.
-        if (fileCounter === filePaths.length) {
-          console.log('Writing merged HTML to ' + destination)
-          fsPromises.writeFile(destination, mergedDom.serialize())
-          resolve(true)
-        } else {
-          const bundleScriptTag = mergedDom.window.document
-            .querySelector('[data-script-name="main"]')
-          if (bundleScriptTag) {
-            bundleScriptTag.remove()
-          }
-        }
-
-        fileCounter += 1
-      })
-    } catch (error) {
-      console.log(error)
-      reject(error)
     }
-  })
+
+    // Remove the main bundle script tag from all but the last file,
+    // so it doesn't load multiple times.
+    if (i < filePaths.length - 1) {
+      const bundleScriptTag = mergedDom.window.document
+        .querySelector('[data-script-name="main"]')
+      if (bundleScriptTag) {
+        bundleScriptTag.remove()
+      }
+    }
+  }
+
+  console.log('Writing merged HTML to ' + destination)
+  await fsPromises.writeFile(destination, mergedDom.serialize())
+  return true
 }
 
 module.exports = merge

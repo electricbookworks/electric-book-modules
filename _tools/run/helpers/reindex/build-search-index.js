@@ -1,8 +1,10 @@
-const puppeteer = require('puppeteer')
+const cheerio = require('cheerio')
 const fs = require('fs')
 const fsPath = require('path')
 const fsPromises = require('fs/promises')
 const fsExtra = require('fs-extra')
+const cleanIndexFiles = require('./clean-index-files.js')
+const toStandardJsLiteral = require('./js-literal.js')
 
 // This function writes a single file for the content API
 async function writeContentAPIFile (pageObject) {
@@ -36,13 +38,10 @@ function generateContentAPI (outputFormat, configsObject) {
 
 // The main process for generating a search index
 async function buildSearchIndex (outputFormat, filesData, configsObject) {
-  // This will be the elasticllunr index without /docs.
-  // We'll close the array when we've added all its objects.
-  let searchIndexNoDocs = 'const store = ['
-
-  // This will be the elasticllunr index with /docs.
-  // We'll close the array when we've added all its objects.
-  let searchIndexWithDocs = 'const store = ['
+  // These hold the elasticlunr index page objects.
+  // One set includes /docs pages, the other excludes them.
+  const storeNoDocs = []
+  const storeWithDocs = []
 
   // Are we generating the API?
   const api = generateContentAPI(outputFormat, configsObject)
@@ -58,10 +57,6 @@ async function buildSearchIndex (outputFormat, filesData, configsObject) {
     await fsExtra.emptyDir(fsPath.normalize(process.cwd() + '/_api/content'))
   }
 
-  // Launch the browser
-  const puppeteerArgs = process.env.PUPPETEER_ARGS ? process.env.PUPPETEER_ARGS.split(' ') : []
-  const browser = await puppeteer.launch({ headless: true, args: puppeteerArgs })
-
   let i
   let count = 0
   for (i = 0; i < filesData.length; i += 1) {
@@ -71,12 +66,10 @@ async function buildSearchIndex (outputFormat, filesData, configsObject) {
     // is run from the repo root, e.g as
     // node _site/assets/js/render-search-index.js
     // in which case the repo root is the current working directory (cwd).
-    // Puppeteer requires the protocol (file://) on unix.
     // Note we do not normalise here, because we want
     // the path to use forward slashes even on Windows,
     // so we can check the string later on.
     const path = process.cwd() + '/_site/' + filesData[i].path
-    const pathWithProtocol = 'file://' + path
 
     // Check that the page exists before we
     // try to open it
@@ -95,59 +88,30 @@ async function buildSearchIndex (outputFormat, filesData, configsObject) {
       continue
     }
 
-    // Open a new tab
-    const page = await browser.newPage()
-
-    // Set debug to true to return any browser-console
-    // messages to the Node console
-    const debug = false
-    if (debug === true) {
-      page.on('console', function (consoleObj) {
-        console.log(consoleObj.text())
-      })
-    }
-
-    // Go to the page URL
-    await page.goto(pathWithProtocol)
+    // Read and parse the page's HTML
+    const html = await fsPromises.readFile(fsPath.normalize(path), 'utf8')
+    const $ = cheerio.load(html)
 
     // Get the page title
-    const title = await page.evaluate(
-      function () {
-        const titleElement = document.title
-        let titleText = ''
-        if (titleElement) {
-          titleText = document.title
-            .replace(/"/g, '\'').replace(/\s+/g, ' ').trim()
-        }
-        return titleText
-      }
-    )
+    let title = ''
+    const titleText = $('title').text()
+    if (titleText) {
+      title = titleText.replace(/"/g, '\'').replace(/\s+/g, ' ').trim()
+    }
 
     // Get the page description
-    const description = await page.evaluate(
-      function () {
-        let descriptionText = ''
-        const descriptionTag = document.querySelector('meta[name="description"]')
-        if (descriptionTag) {
-          descriptionText = descriptionTag.content
-            .replace(/"/g, '\'').replace(/\s+/g, ' ').trim()
-        }
-        return descriptionText
-      }
-    )
+    let description = ''
+    const descriptionContent = $('meta[name="description"]').attr('content')
+    if (descriptionContent) {
+      description = descriptionContent.replace(/"/g, '\'').replace(/\s+/g, ' ').trim()
+    }
 
     // Get the page content
-    const content = await page.evaluate(
-      function () {
-        const contentDiv = document.body.querySelector('.content')
-        let contentText = ''
-        if (contentDiv) {
-          contentText = contentDiv.textContent
-            .replace(/"/g, '\'').replace(/\s+/g, ' ').trim()
-        }
-        return contentText
-      }
-    )
+    let content = ''
+    const contentDiv = $('body .content')
+    if (contentDiv.length > 0) {
+      content = contentDiv.text().replace(/"/g, '\'').replace(/\s+/g, ' ').trim()
+    }
 
     // Build the API endpoint
     const endpoint = 'api/content/' +
@@ -183,15 +147,8 @@ async function buildSearchIndex (outputFormat, filesData, configsObject) {
     //   title: "Title of page",
     //   content: "Content of page",
     // }
-    let searchIndexEntry = JSON.stringify(pageObjectForAPIContent)
-
-    // Add entry to the searchIndex array
-    searchIndexWithDocs += searchIndexEntry
-
-    // Add a comma if this isn't the last entry
-    if (i !== (filesData.length - 1)) {
-      searchIndexWithDocs += ','
-    }
+    // Add entry to the with-docs store.
+    storeWithDocs.push(pageObjectForAPIContent)
 
     // If this page isn't a doc, include it
     // in the no-docs search index and the API index,
@@ -200,12 +157,7 @@ async function buildSearchIndex (outputFormat, filesData, configsObject) {
     // above, since it would have backslashes on Windows
     // if the path had been normalised.
     if (!path.includes('/_site/docs/')) {
-      searchIndexNoDocs += searchIndexEntry
-
-      // Add a comma if this isn't the last entry
-      if (i !== (filesData.length - 1)) {
-        searchIndexNoDocs += ','
-      }
+      storeNoDocs.push(pageObjectForAPIContent)
 
       if (api) {
         contentIndexForAPI.push(pageObjectForAPIIndex)
@@ -216,66 +168,49 @@ async function buildSearchIndex (outputFormat, filesData, configsObject) {
     // Increment counter
     count += 1
 
-    // Reset the entry and pageObjects
-    searchIndexEntry = ''
+    // Reset the pageObjects
     pageObjectForAPIIndex = {}
     pageObjectForAPIContent = {}
-
-    // Close the page when we're done
-    await page.close()
   }
 
-  // If we've got all the pages, close the array
-  // and close the Puppeteer browser.
-  if (count === filesData.length) {
-    const exportStore = 'if (store) { module.exports = store }'
-    searchIndexNoDocs += ']; ' + exportStore
-    searchIndexWithDocs += ']; ' + exportStore
-    browser.close()
+  // Build the store file contents.
+  // The data is written as a Standard-style JS literal so the files
+  // are human-readable and pass linting; webpack minifies them later.
+  function buildStoreFile (store) {
+    return 'const store = ' + toStandardJsLiteral(store) + '\n\n' +
+        'if (store) { module.exports = store }\n'
   }
 
-  // Create empty index files to write to, if they don't exist
+  // Work out the search-index file paths and names.
+  const fileNameNoDocs = 'search-index-' + outputFormat + '.js'
+  const fileNameWithDocs = 'search-index-with-docs-' + outputFormat + '.js'
   const indexFilePathNoDocs = fsPath.normalize(process.cwd() +
-      '/_indexes/search-index-' + outputFormat + '.js')
+      '/_indexes/' + fileNameNoDocs)
   const indexFilePathWithDocs = fsPath.normalize(process.cwd() +
-      '/_indexes/search-index-with-docs-' + outputFormat + '.js')
+      '/_indexes/' + fileNameWithDocs)
   const indexFilePathForAPI = fsPath.normalize(process.cwd() +
       '/_api/content/index.json')
 
-  if (!fs.existsSync(indexFilePathNoDocs)) {
-    console.log('Creating ' + indexFilePathNoDocs)
-    await fsPromises.writeFile(indexFilePathNoDocs, '')
-  }
-  if (!fs.existsSync(indexFilePathWithDocs)) {
-    console.log('Creating ' + indexFilePathWithDocs)
-    await fsPromises.writeFile(indexFilePathWithDocs, '')
-  }
-  if (api && (!fs.existsSync(indexFilePathForAPI))) {
-    console.log('Creating ' + indexFilePathForAPI)
-    await fsPromises.writeFile(indexFilePathForAPI, '')
-  }
-
   // Write the search index files.
+  // fsExtra.outputFile creates the path and file if they don't exist.
+  await fsExtra.outputFile(indexFilePathWithDocs, buildStoreFile(storeWithDocs))
+  console.log('Writing ' + indexFilePathWithDocs)
+
+  await fsExtra.outputFile(indexFilePathNoDocs, buildStoreFile(storeNoDocs))
+  console.log('Writing ' + indexFilePathNoDocs)
+
+  // Write the API index file.
   // Note: contentIndexForAPI is an object and must be stringified.
-  fs.writeFile(indexFilePathWithDocs,
-    searchIndexWithDocs, function () {
-      console.log('Writing ' + indexFilePathWithDocs)
-      console.log('Done.')
-    })
-
-  fs.writeFile(indexFilePathNoDocs,
-    searchIndexNoDocs, function () {
-      console.log('Writing ' + indexFilePathNoDocs)
-      console.log('Done.')
-    })
-
   if (api) {
-    fs.writeFile(indexFilePathForAPI,
-      JSON.stringify(contentIndexForAPI), function () {
-        console.log('Writing ' + indexFilePathForAPI)
-        console.log('Done.')
-      })
+    await fsExtra.outputFile(indexFilePathForAPI, JSON.stringify(contentIndexForAPI))
+    console.log('Writing ' + indexFilePathForAPI)
   }
+
+  // Remove any stale or legacy index files that don't match the
+  // current output naming patterns for any format.
+  await cleanIndexFiles()
+
+  console.log('Done.')
 }
 
 // Run the rendering process

@@ -7,47 +7,6 @@
 
 const fs = require('fs')
 
-// On Windows, MathJax v4's context.path() rewrites absolute component paths
-// into file:// URLs (intended for ESM import()). The CommonJS component loader
-// used here calls require() on those names, and Node cannot resolve a file://
-// URL string via require() on Windows, so it throws "Cannot find module".
-// Strip the file:// scheme before resolution so require() sees a plain path.
-//
-// This patches Node's private Module._resolveFilename, so we keep it as
-// narrowly scoped as possible: it is only applied on Windows (the only
-// platform where the paths carry the file:// scheme), and it is installed
-// only around the MathJax load/typeset and restored as soon as that finishes
-// (see installResolverPatch/restoreResolverPatch usage below).
-const Module = require('module')
-const originalResolveFilename = Module._resolveFilename
-
-// Only Windows produces the file:// component paths that break require().
-const needsResolverPatch = process.platform === 'win32'
-
-// Resolver that strips a leading file:// scheme before delegating to the
-// original Node resolver, so require() sees a plain path it can resolve.
-function patchedResolveFilename (request, ...args) {
-  if (typeof request === 'string' && request.startsWith('file://')) {
-    request = request.slice('file://'.length)
-  }
-  return originalResolveFilename.call(this, request, ...args)
-}
-
-// Install the patch (Windows only). Called immediately before loading MathJax.
-function installResolverPatch () {
-  if (needsResolverPatch) {
-    Module._resolveFilename = patchedResolveFilename
-  }
-}
-
-// Restore the original resolver so the patch does not affect the rest of the
-// process. Called once MathJax has finished loading and typesetting.
-function restoreResolverPatch () {
-  if (needsResolverPatch) {
-    Module._resolveFilename = originalResolveFilename
-  }
-}
-
 /*************************************************************************
  *
  *  component/tex2mml-page
@@ -114,7 +73,7 @@ global.MathJax = {
     paths: { mathjax: '@mathjax/src/bundle' },
     source: (argv.dist ? {} : require('@mathjax/src/components/js/source.js').source),
     require,
-    load: ['adaptors/liteDOM', 'input/tex']
+    load: ['core', 'adaptors/liteDOM', 'input/tex']
   },
   options: {
     renderActions: {
@@ -131,18 +90,20 @@ global.MathJax = {
     typeset: true,
     document: htmlfile,
     ready () {
+      // In source (non-dist) mode, liteDOM lazily async-loads named-entity
+      // tables from '[mathjax]/util/entities/*.js'. The loader resolves
+      // '[mathjax]' to the bundle dir, which has no entities, so the load
+      // fails and cascades into 'Can't find handler for document'.
+      // Preload all entity tables up front to avoid any async load.
+      if (!argv.dist) {
+        require('@mathjax/src/cjs/util/entities/all.js')
+      }
       global.MathJax.startup.defaultReady()
     }
   }
 }
 
-//  Load the MathJax startup module.
-//  The resolver patch is installed just before this load and restored once the
-//  startup promise settles below, so it is scoped to MathJax only. Restoring
-//  after the promise (rather than immediately after this require) is deliberate:
-//  the "require"/"autoload" TeX packages can lazily load further components
-//  during typesetting, which happens inside the promise chain.
-installResolverPatch()
+//  Load the MathJax startup module
 require('@mathjax/src/' + (argv.dist ? 'bundle' : 'components/js') + '/startup/startup.js')
 
 //  Wait for MathJax to start up, and then render the math.
@@ -198,4 +159,4 @@ global.MathJax.startup.promise.then(() => {
   fs.writeFile(outputFilePath, outputFileContents, (err) => {
     if (err) throw err
   })
-}).catch(err => console.log(err)).finally(restoreResolverPatch)
+}).catch(err => console.log(err))

@@ -9,8 +9,10 @@ const merge = require('../merge/index.js')
 // Word export
 async function exportWord (argv) {
   try {
-    await fs.emptyDir(process.cwd() + '/_site')
-    await jekyll(argv)
+    if (!argv.skipbuild) {
+      await fs.emptyDir(process.cwd() + '/_site')
+      await jekyll(argv)
+    }
 
     // Word export does not yet support index comments
     // and index links. We need to extend the gulp tasks

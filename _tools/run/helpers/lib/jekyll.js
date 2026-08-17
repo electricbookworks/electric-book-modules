@@ -4,6 +4,7 @@ const configString = require('./configString.js')
 const configsObject = require('./configsObject.js')
 const jekyllSwitches = require('./jekyllSwitches.js')
 const extraExcludesConfig = require('./extraExcludesConfig.js')
+const deployTypeConfig = require('./deployTypeConfig.js')
 
 // Run Jekyll
 async function jekyll (argv) {
@@ -37,6 +38,12 @@ async function jekyll (argv) {
   const extraConfigs = await extraExcludesConfig(argv)
   if (extraConfigs) {
     configs += ',' + extraConfigs
+  }
+
+  // Expose the deploy type to Jekyll as `site.deploy-type`
+  const deployTypeConfigFile = await deployTypeConfig(argv)
+  if (deployTypeConfigFile) {
+    configs += ',' + deployTypeConfigFile
   }
 
   let destination = '_site' + baseurl
