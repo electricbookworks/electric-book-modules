@@ -1,6 +1,5 @@
 /* globals MutationObserver */
 
-import { ebReplaceCanonicalURL } from './utilities'
 import { ebGetWPUserSession } from './wordpress-user-profile'
 
 export default function ebLoginPrompts () {
@@ -20,14 +19,6 @@ export default function ebLoginPrompts () {
   async function ebDisplayLoginPrompts () {
     const sidebarLoginPrompt = document.querySelector('.sidebar-login-prompt')
     const userSession = await ebGetWPUserSession()
-
-    // If they are not logged in, show the sidebar prompt on the home page
-    // First check whether we need to change the URL of the login button if we
-    // are not on the live server
-    if (sidebarLoginPrompt) {
-      const loginButton = sidebarLoginPrompt.querySelector('.login-link')
-      ebReplaceCanonicalURL(loginButton)
-    }
 
     if (!userSession) {
       if (sidebarLoginPrompt && document.body.classList.contains('home')) {

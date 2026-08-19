@@ -1,5 +1,3 @@
-import { ebReplaceCanonicalURL } from './utilities'
-
 const userDetailUrl = '/api/session/'
 const params = {
   headers: {
@@ -32,11 +30,6 @@ export default async function ebWordPressUserProfile () {
     // When we're logged in, let the masthead know for CSS reasons
     masthead.classList.add('logged-in')
   } else {
-    // First check whether we need to change the URL of the login button if we
-    // are not on the live server
-    const loginButton = profile.querySelector('.login')
-    ebReplaceCanonicalURL(loginButton)
-
     // Then show the login and register buttons
     profile.classList.remove('visuallyhidden')
     profile.querySelector('.buttons').classList.remove('visuallyhidden')
