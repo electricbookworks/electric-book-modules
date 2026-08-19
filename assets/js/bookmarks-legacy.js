@@ -541,8 +541,10 @@ function ebBookmarksElementID (element) {
     return element.id
   } else if (window.location.hash) {
     // If for some reason the element has no ID,
-    // return the hash of the current window location.
-    return window.location.hash
+    // return the current window location's hash without the leading '#',
+    // so the result is a bare element ID (as document.getElementById and
+    // callers that prepend '#' both expect).
+    return window.location.hash.replace(/^#/, '')
   } else {
     // And in desperation, use the first element
     // with an ID on the page.
@@ -1071,10 +1073,12 @@ function ebBookmarksListenForTextSelection () {
 
 // Set the lastLocation bookmark
 function ebBookmarksSetLastLocation () {
-  const lastLocationId = ebBookmarksElementID()
-  if (lastLocationId) {
-    ebBookmarksSetBookmark('lastLocation', document.getElementById(lastLocationId))
-  }
+  // Only save when the ID resolves to a real element on the page.
+  // Otherwise document.getElementById returns null and ebBookmarksSetBookmark
+  // would throw when it reads the element's textContent.
+  const elementID = ebBookmarksElementID()
+  const element = elementID && document.getElementById(elementID)
+  element && ebBookmarksSetBookmark('lastLocation', element)
 }
 
 // Move the modal HTML to an independent location
