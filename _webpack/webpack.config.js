@@ -11,6 +11,46 @@ const ebBuild = process.env.build || 'development'
 const isWebAppOutput = process.env.output === 'web' || process.env.output === 'app'
 const isPrinceOutput = process.env.output === 'print-pdf' || process.env.output === 'screen-pdf'
 
+// Generate one webpack entry per split book-index file, using
+// assets/js/entries/indexing.js as a template. Each entry requires its
+// own index file and produces a matching dist bundle, e.g.
+// web-mybook-es-index.js -> web-mybook-es-indexes.dist.js.
+// Search indexes are excluded; they're handled separately.
+function indexEntries () {
+  if (!isWebAppOutput) {
+    return {}
+  }
+
+  // The template lives in the engine package's assets, which aren't
+  // copied into the book repo, so resolve it from the installed package
+  // rather than relative to this config file.
+  let template
+  try {
+    template = require.resolve('@electricbookworks/electric-book-modules/assets/js/entries/indexing.js')
+  } catch (error) {
+    return {}
+  }
+  const indexesDir = path.resolve(process.cwd(), '_indexes')
+  if (!fs.existsSync(indexesDir)) {
+    return {}
+  }
+
+  const loader = path.resolve(__dirname, 'loaders/index-entry-loader.js')
+  const entries = {}
+
+  fs.readdirSync(indexesDir)
+    .filter(name => name.startsWith(`${process.env.output}-`) && name.endsWith('-index.js'))
+    .forEach(name => {
+      // e.g. web-mybook-es-index.js -> web-mybook-es-indexes
+      const entryName = name.replace(/-index\.js$/, '-indexing')
+      // The index file to require, without its .js extension.
+      const fileBase = name.replace(/\.js$/, '')
+      entries[entryName] = `${loader}!${template}?file=${fileBase}`
+    })
+
+  return entries
+}
+
 module.exports = {
   mode,
   entry: {
@@ -18,9 +58,7 @@ module.exports = {
     ...(isWebAppOutput && fs.existsSync(path.resolve(process.cwd(), 'assets/js/search.js')) && {
       search: path.resolve(process.cwd(), 'assets/js/search.js')
     }),
-    ...(isWebAppOutput && fs.existsSync(path.resolve(process.cwd(), 'assets/js/indexing.js')) && {
-      indexing: path.resolve(process.cwd(), 'assets/js/indexing.js')
-    })
+    ...indexEntries()
   },
   target: isPrinceOutput ? ['web', 'es5'] : 'web',
   output: {

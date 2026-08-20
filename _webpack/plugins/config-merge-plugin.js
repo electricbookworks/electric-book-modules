@@ -34,6 +34,12 @@ class ConfigMergePlugin {
           console.log(`✓ Overriding baseurl with command-line value: '${process.env.baseurl}'`)
         }
 
+        // Expose the deploy type as `deploy-type` (matching Jekyll's site.deploy-type)
+        if (process.env.deployType !== null && process.env.deployType !== undefined) {
+          mergedConfig['deploy-type'] = process.env.deployType
+          console.log(`✓ Setting deploy-type with command-line value: '${process.env.deployType}'`)
+        }
+
         this.definition = JSON.stringify(mergedConfig)
 
         callback()

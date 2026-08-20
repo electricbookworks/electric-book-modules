@@ -27,6 +27,7 @@ async function webpack (argv) {
       output: argv.format,
       build: argv.build,
       debug: argv.debugjs,
+      deployType: argv.deploytype,
       configFiles
     }
 

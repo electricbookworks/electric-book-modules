@@ -181,12 +181,26 @@ const options = {
     defaultDescription: 'false',
     type: 'boolean'
   },
+  deploytype: {
+    description: 'The type of environment for which you want to deploy, such as live, staging, or test.',
+    alias: 'dt',
+    default: 'development',
+    defaultDescription: 'development',
+    type: 'string'
+  },
   destination: {
     description: 'Output destination directory',
     alias: 'dest',
     default: '_site',
     defaultDescription: '_site',
     type: 'string'
+  },
+  skipbuild: {
+    description: 'Whether to skip the build process. Assumes _site is in ready state.',
+    alias: 'sb',
+    default: false,
+    defaultDescription: 'false',
+    type: 'boolean'
   }
 }
 

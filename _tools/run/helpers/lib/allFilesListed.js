@@ -44,7 +44,9 @@ async function allFilesListed (argv, options) {
           const filePath = work + '/' + filename + '.html'
 
           const fileData = {
-            path: filePath
+            path: filePath,
+            book: work,
+            language: ''
           }
 
           if (options && options.check) {
@@ -79,7 +81,9 @@ async function allFilesListed (argv, options) {
               const filePath = work + '/' + language + '/' + filename + '.html'
 
               const fileData = {
-                path: filePath
+                path: filePath,
+                book: work,
+                language
               }
 
               if (options && options.check) {

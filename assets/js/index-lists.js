@@ -71,11 +71,6 @@ function ebIndexFindLinks (listItem, ebIndexTargets) {
   // an index term.
   const listItemSlug = ebSlugify(listItemTree.join(' \\ '), true)
 
-  // Get the book title and translation language (if any)
-  // for the HTML page we're processing.
-  const currentBookTitle = document.querySelector('.wrapper').dataset.title
-  const currentTranslation = document.querySelector('.wrapper').dataset.translation
-
   // Look through the index 'database' of targets
   // Each child in the ebIndexTargets array represents
   // the index anchor targets on one HTML page.
@@ -86,48 +81,29 @@ function ebIndexFindLinks (listItem, ebIndexTargets) {
   let pageReferenceSequenceNumber = 1
 
   ebIndexTargets.forEach(function (pageEntries) {
-    // First, check if the entries for this page
-    // of entries are for files in the same book.
-    // We just check against the first entry for the page.
-    let titleMatches = false
-    let languageMatches = false
-    if (currentBookTitle === pageEntries[0].bookTitle) {
-      titleMatches = true
-    }
-    // Note, both of these could be null,
-    // if this is not a translation.
-    // (Note we're being lazy here, so this code might need work.
-    // Technically one could be undefined and the other null.
-    // The gulp alternative in `renderIndexListReferences` has better logic.)
-    if (currentTranslation === pageEntries[0].translationLanguage) {
-      languageMatches = true
-    }
-
-    if (titleMatches && languageMatches) {
-      // Find this entry's page numbers
-      let rangeOpen = false
-      pageEntries.forEach(function (entry) {
-        if (entry.entrySlug === listItemSlug) {
-          // If a 'from' link has started a reference range, skip
-          // adding links till the next 'to' link that closes the range.
-          if (entry.range === 'from') {
-            rangeOpen = true
-            ebIndexAddLink(listItem, pageReferenceSequenceNumber, entry)
-            pageReferenceSequenceNumber += 1
-          }
-          if (rangeOpen) {
-            if (entry.range === 'to') {
-              ebIndexAddLink(listItem, pageReferenceSequenceNumber, entry)
-              pageReferenceSequenceNumber += 1
-              rangeOpen = false
-            }
-          } else {
-            ebIndexAddLink(listItem, pageReferenceSequenceNumber, entry)
-            pageReferenceSequenceNumber += 1
-          }
+    // Find this entry's page numbers
+    let rangeOpen = false
+    pageEntries.forEach(function (entry) {
+      if (entry.entrySlug === listItemSlug) {
+        // If a 'from' link has started a reference range, skip
+        // adding links till the next 'to' link that closes the range.
+        if (entry.range === 'from') {
+          rangeOpen = true
+          ebIndexAddLink(listItem, pageReferenceSequenceNumber, entry)
+          pageReferenceSequenceNumber += 1
         }
-      })
-    }
+        if (rangeOpen) {
+          if (entry.range === 'to') {
+            ebIndexAddLink(listItem, pageReferenceSequenceNumber, entry)
+            pageReferenceSequenceNumber += 1
+            rangeOpen = false
+          }
+        } else {
+          ebIndexAddLink(listItem, pageReferenceSequenceNumber, entry)
+          pageReferenceSequenceNumber += 1
+        }
+      }
+    })
   })
 }
 
@@ -151,8 +127,7 @@ export default function ebIndexLists (ebIndexTargets) {
     })
 
     // Flag when we're done
-    if (indexListsProcessed === indexLists.length ||
-                indexLists.length === 1) {
+    if (indexListsProcessed === indexLists.length || indexLists.length === 1) {
       document.body.setAttribute('data-index-list', 'loaded')
     }
     indexListsProcessed += 1

@@ -1,4 +1,5 @@
 const fsPath = require('path')
+const os = require('os')
 const spawn = require('cross-spawn')
 const logProcess = require('./logProcess.js')
 const mathjaxEnabled = require('./mathjaxEnabled.js')
@@ -41,17 +42,37 @@ async function renderMathjax (argv, options) {
       const mathJaxScript = process.cwd() +
       '/_tools/run/helpers/mathjax/tex2mml-page.js'
 
-      // Process MathJax
-      for (const path of inputFiles) {
-        if (pathExists(path)) {
-          console.log('Rendering maths in ' + path + ' using script ' + mathJaxScript)
-          const mathJaxProcess = spawn(
-            'node',
-            [mathJaxScript, path, path]
-          )
-          await logProcess(mathJaxProcess, 'Rendering MathJax')
+      // Process MathJax on the files in parallel, but with a bounded
+      // concurrency so we don't spawn one Node process per file all at
+      // once. Spawning hundreds/thousands of processes would exhaust
+      // memory on small CI/Codespaces VMs (2 core / 8GB). At any moment
+      // no more than `concurrency` processes run, refilling as each finishes.
+      const filesToRender = inputFiles.filter(path => pathExists(path))
+      const concurrency = Math.max(1, os.cpus().length)
+
+      const renderFile = path => {
+        console.log('Rendering maths in ' + path + ' using script ' + mathJaxScript)
+        const mathJaxProcess = spawn(
+          'node',
+          [mathJaxScript, path, path]
+        )
+        return logProcess(mathJaxProcess, 'Rendering MathJax')
+      }
+
+      let nextIndex = 0
+      const worker = async () => {
+        while (nextIndex < filesToRender.length) {
+          const path = filesToRender[nextIndex++]
+          await renderFile(path)
         }
       }
+
+      await Promise.all(
+        Array.from(
+          { length: Math.min(concurrency, filesToRender.length) },
+          () => worker()
+        )
+      )
       return true
     } else {
       return true

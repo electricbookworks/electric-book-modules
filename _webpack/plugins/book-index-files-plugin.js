@@ -3,13 +3,15 @@ const path = require('path')
 
 const pluginName = 'BookIndexFilesPlugin'
 
+// This plugin replaces `process.env.bookIndexFiles` in client code
+// with an array of all filenames in the _indexes directory. The index
+// files are now split per book and language, so consumers look up the
+// file they need by name and check this list before requiring it.
 class BookIndexFilesPlugin {
   constructor (options = {}) {
     this.options = {
-      // Directory to scan for book index files
+      // Directory to scan for index files
       searchDir: options.searchDir || '_indexes',
-      // Pattern to match book index files
-      filePattern: options.filePattern || /^book-index-.*\.js$/,
       // Environment variable name
       envVar: options.envVar || 'bookIndexFiles',
       ...options
@@ -18,7 +20,7 @@ class BookIndexFilesPlugin {
     // This is the variable key we'll look for in code
     this.envVarKey = `process.env.${this.options.envVar}`
 
-    // This will store the stringified data
+    // This will store the stringified array of filenames
     this.definition = '[]' // Default to an empty array
   }
 
@@ -28,13 +30,10 @@ class BookIndexFilesPlugin {
     // (e.g. under yalc), causing cross-instance ConstDependency errors.
     const ConstDependency = compiler.webpack.dependencies.ConstDependency
 
-    // Generate book index files data and set up DefinePlugin
-    compiler.hooks.beforeCompile.tapAsync(pluginName, async (params, callback) => {
+    // Generate the list of index filenames and set up the replacement
+    compiler.hooks.beforeCompile.tapAsync(pluginName, (params, callback) => {
       try {
-        const outputFormats = await this.generateBookIndexFilesData()
-
-        this.definition = JSON.stringify(outputFormats || [])
-
+        this.definition = JSON.stringify(this.indexFileNames())
         callback()
       } catch (err) {
         callback(err)
@@ -62,55 +61,41 @@ class BookIndexFilesPlugin {
         .tap(pluginName, handler)
     })
 
-    // Watch for changes (this part was already correct)
+    // Watch the directory and its files for changes
     compiler.hooks.afterCompile.tap(pluginName, (compilation) => {
       const searchDir = path.resolve(process.cwd(), this.options.searchDir)
-      if (fs.existsSync(searchDir)) {
-        compilation.contextDependencies.add(searchDir)
+      if (!fs.existsSync(searchDir)) {
+        return
+      }
 
-        try {
-          const entries = fs.readdirSync(searchDir, { withFileTypes: true })
-          entries.forEach(entry => {
-            if (entry.isFile() && this.options.filePattern.test(entry.name)) {
-              const fullPath = path.join(searchDir, entry.name)
-              compilation.fileDependencies.add(fullPath)
-            }
-          })
-        } catch (err) {
-          console.warn(`Warning: Could not watch directory ${searchDir}:`, err.message)
-        }
+      compilation.contextDependencies.add(searchDir)
+
+      try {
+        this.indexFileNames().forEach((name) => {
+          compilation.fileDependencies.add(path.join(searchDir, name))
+        })
+      } catch (err) {
+        console.warn(`Warning: Could not watch directory ${searchDir}:`, err.message)
       }
     })
   }
 
-  async generateBookIndexFilesData () {
-    try {
-      const searchDir = path.resolve(process.cwd(), this.options.searchDir)
-      const outputFormats = []
+  // Return an array of all index filenames in the search directory.
+  indexFileNames () {
+    const searchDir = path.resolve(process.cwd(), this.options.searchDir)
 
-      if (!fs.existsSync(searchDir)) {
-        console.warn(`Search directory not found: ${searchDir}`)
-        return outputFormats
-      }
-
-      const entries = fs.readdirSync(searchDir, { withFileTypes: true })
-
-      for (const entry of entries) {
-        if (entry.isFile() && this.options.filePattern.test(entry.name)) {
-          const formatMatch = entry.name.match(/^book-index-(.+)\.js$/)
-          if (formatMatch) {
-            outputFormats.push(formatMatch[1])
-          }
-        }
-      }
-
-      console.log(`✓ Found book index files for formats: [${outputFormats.join(', ')}] -> ${this.envVarKey}`)
-
-      return outputFormats
-    } catch (error) {
-      console.error('Error generating book index files data:', error)
-      throw error
+    if (!fs.existsSync(searchDir)) {
+      console.warn(`Search directory not found: ${searchDir}`)
+      return []
     }
+
+    const fileNames = fs.readdirSync(searchDir, { withFileTypes: true })
+      .filter(entry => entry.isFile())
+      .map(entry => entry.name)
+
+    console.log(`✓ Found index files: [${fileNames.join(', ')}] -> ${this.envVarKey}`)
+
+    return fileNames
   }
 }
 

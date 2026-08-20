@@ -3,58 +3,46 @@
 // Import modules
 const fs = require('fs')
 const yaml = require('js-yaml')
-const { book, language } = require('./args.js')
+const { book, language, format } = require('./args.js')
 
 // Load scripts from elsewhere in this repo
 const pathToJsAssetsSrc = `${process.cwd()}/_indexes/`
 
-let printpdfIndexTargets
-try {
-  if (!fs.existsSync(pathToJsAssetsSrc + 'book-index-print-pdf.js')) {
-    fs.writeFileSync(pathToJsAssetsSrc + 'book-index-print-pdf.js', '')
+// Work out the reference-index filename for the current book, language
+// and output format. Book-index 'databases' are split per book and per
+// language, so this must match referenceIndexFileName() in
+// _tools/run/helpers/reindex/build-reference-index.js.
+function referenceIndexFileName (book, language, outputFormat) {
+  // args.js prefixes a non-default language with a slash (e.g. '/fr'),
+  // so strip it before building the filename segment.
+  const languageName = language.replace(/^\//, '')
+  const languageSegment = languageName ? '-' + languageName : ''
+  if (!book) {
+    return outputFormat + '-book' + languageSegment + '-index.js'
   }
-  printpdfIndexTargets = require(pathToJsAssetsSrc + 'book-index-print-pdf.js')
-} catch (printpdfIndexTargetsError) {
-  console.log(printpdfIndexTargetsError)
-  console.log(`Could not find ${pathToJsAssetsSrc}book-index-print-pdf.js.`)
-  console.log('This is fine if you are only processing images.')
+  return outputFormat + '-' + book + languageSegment + '-index.js'
 }
 
-let screenpdfIndexTargets
-try {
-  if (!fs.existsSync(pathToJsAssetsSrc + 'book-index-screen-pdf.js')) {
-    fs.writeFileSync(pathToJsAssetsSrc + 'book-index-screen-pdf.js', '')
+// Load the book-index 'database' for the current book/language/format.
+// We only require the file if it exists, so that loading this module
+// doesn't create empty placeholder files for formats that aren't
+// being built (e.g. building web shouldn't touch the PDF/epub/app
+// index files). Missing files default to an empty array.
+function loadIndexTargets () {
+  const indexFilePath = pathToJsAssetsSrc + referenceIndexFileName(book, language, format)
+  if (fs.existsSync(indexFilePath)) {
+    try {
+      return require(indexFilePath)
+    } catch (error) {
+      console.log(error)
+      console.log(`Could not load ${indexFilePath}.`)
+      console.log('This is fine if you are only processing images.')
+    }
   }
-  screenpdfIndexTargets = require(pathToJsAssetsSrc + 'book-index-screen-pdf.js')
-} catch (screenpdfIndexTargetsError) {
-  console.log(screenpdfIndexTargetsError)
-  console.log(`Could not find ${pathToJsAssetsSrc}book-index-screen-pdf.js.`)
-  console.log('This is fine if you are only processing images.')
+  return []
 }
 
-let epubIndexTargets
-try {
-  if (!fs.existsSync(pathToJsAssetsSrc + 'book-index-epub.js')) {
-    fs.writeFileSync(pathToJsAssetsSrc + 'book-index-epub.js', '')
-  }
-  epubIndexTargets = require(pathToJsAssetsSrc + 'book-index-epub.js')
-} catch (epubIndexTargetsError) {
-  console.log(epubIndexTargetsError)
-  console.log(`Could not find ${pathToJsAssetsSrc}book-index-epub.js.`)
-  console.log('This is fine if you are only processing images.')
-}
-
-let appIndexTargets
-try {
-  if (!fs.existsSync(pathToJsAssetsSrc + 'book-index-app.js')) {
-    fs.writeFileSync(pathToJsAssetsSrc + 'book-index-app.js', '')
-  }
-  appIndexTargets = require(pathToJsAssetsSrc + 'book-index-app.js')
-} catch (appIndexTargetsError) {
-  console.log(appIndexTargetsError)
-  console.log(`Could not find ${pathToJsAssetsSrc}book-index-app.js.`)
-  console.log('This is fine if you are only processing images.')
-}
+const indexTargets = loadIndexTargets()
 
 // Load image settings if they exist
 let imageSettings = []
@@ -107,9 +95,6 @@ const paths = {
   }
 }
 
-exports.printpdfIndexTargets = printpdfIndexTargets
-exports.screenpdfIndexTargets = screenpdfIndexTargets
-exports.epubIndexTargets = epubIndexTargets
-exports.appIndexTargets = appIndexTargets
+exports.indexTargets = indexTargets
 exports.imageSettings = imageSettings
 exports.paths = paths

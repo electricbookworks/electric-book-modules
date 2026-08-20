@@ -4,7 +4,12 @@ const variantSettings = require('../settings/variantSettings.js')
 
 // Get array of book-asset file paths for this output.
 // assetType can be images or styles.
-function bookAssetPaths (argv, assetType, folder) {
+// options.parentOnly forces the parent (untranslated) asset path,
+// even when a translation has its own assets. This is needed because
+// a translation that has its own styles links to BOTH the parent
+// stylesheet and its own, so the build needs to resolve each in turn.
+function bookAssetPaths (argv, assetType, folder, options) {
+  options = options || {}
   // Provide fallback book folder, which lets us
   // specify the 'assets' folder.
   let book
@@ -37,8 +42,10 @@ function bookAssetPaths (argv, assetType, folder) {
 
   // If translated assets exist, use that path,
   // otherwise use the parent assets.
+  // When options.parentOnly is set, always use the parent assets.
   let pathToAssets
-  if (argv.language &&
+  if (!options.parentOnly &&
+            argv.language &&
             fs.existsSync(pathToTranslatedAssets) &&
             fs.readdirSync(pathToTranslatedAssets).length > 0) {
     pathToAssets = pathToTranslatedAssets
