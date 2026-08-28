@@ -1,5 +1,6 @@
 const spawn = require('cross-spawn')
 const logProcess = require('./logProcess.js')
+const languagePathSegment = require('../paths/languagePathSegment.js')
 
 // Converts paths in links from *.html to *.xhtml
 async function convertXHTMLLinks (argv) {
@@ -7,7 +8,7 @@ async function convertXHTMLLinks (argv) {
 
   try {
     let convertXHTMLLinksProcess
-    if (argv.language) {
+    if (languagePathSegment(argv)) {
       convertXHTMLLinksProcess = spawn(
         'gulp',
         ['epubXhtmlLinks',

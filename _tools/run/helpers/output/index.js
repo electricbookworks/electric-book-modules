@@ -29,6 +29,7 @@ const {
   electron
 } = require('../helpers.js')
 const htmlFilePaths = require('../paths/htmlFilePaths.js')
+const languagePathSegment = require('../paths/languagePathSegment.js')
 const pathExists = require('../paths/pathExists.js')
 const merge = require('../merge')
 
@@ -81,15 +82,15 @@ async function epub (argv) {
     await cleanHTMLFiles(argv)
 
     let htmlDestination = argv.book
-    if (argv.language) {
-      htmlDestination = argv.book + '/' + argv.language
+    if (languagePathSegment(argv)) {
+      htmlDestination = argv.book + languagePathSegment(argv)
     }
     const epubFiles = await htmlFilePaths(argv, '.xhtml')
     await addToEpub(epubFiles, htmlDestination)
 
     let imagesDestination = argv.book + '/images/epub'
-    if (argv.language) {
-      imagesDestination = argv.book + '/' + argv.language + '/images/epub'
+    if (languagePathSegment(argv)) {
+      imagesDestination = argv.book + languagePathSegment(argv) + '/images/epub'
     }
     await addToEpub(bookAssetPaths(argv, 'images'), imagesDestination)
 
@@ -99,15 +100,15 @@ async function epub (argv) {
     // their matching paths, otherwise the translation stylesheet is
     // missing and EPUBCheck reports RSC-001 (file could not be found).
     const translatedStylesDir = fsPath.normalize(process.cwd() + '/_site/' +
-      argv.book + '/' + (argv.language || '') + '/styles')
-    const hasTranslatedStyles = argv.language &&
+      argv.book + languagePathSegment(argv) + '/styles')
+    const hasTranslatedStyles = languagePathSegment(argv) &&
       pathExists(translatedStylesDir) &&
       fs.readdirSync(translatedStylesDir).length > 0
 
     if (hasTranslatedStyles) {
       // The translation's own stylesheet, into its language styles folder.
       await addToEpub(bookAssetPaths(argv, 'styles'),
-        argv.book + '/' + argv.language + '/styles')
+        argv.book + languagePathSegment(argv) + '/styles')
       // The parent stylesheet, which the translation styles override.
       await addToEpub(bookAssetPaths(argv, 'styles', null, { parentOnly: true }),
         argv.book + '/styles')
@@ -132,10 +133,10 @@ async function epub (argv) {
       argv.book +
       '/package.opf'
 
-    if (argv.language) {
+    if (languagePathSegment(argv)) {
       opfFile = process.cwd() + '/_site/' +
-        argv.book + '/' +
-        argv.language +
+        argv.book +
+        languagePathSegment(argv) +
         '/package.opf'
     }
 
@@ -146,10 +147,10 @@ async function epub (argv) {
     let ncxFile = process.cwd() + '/_site/' +
       argv.book + '/toc.ncx'
 
-    if (argv.language) {
+    if (languagePathSegment(argv)) {
       ncxFile = process.cwd() + '/_site/' +
-        argv.book + '/' +
-        argv.language +
+        argv.book +
+        languagePathSegment(argv) +
         '/toc.ncx'
     }
 
@@ -164,7 +165,7 @@ async function epub (argv) {
       '/_output/' +
       argv.book + '.epub')
 
-    if (argv.language) {
+    if (languagePathSegment(argv)) {
       pathToEpub = fsPath.normalize(process.cwd() +
         '/_output/' +
         argv.book + '-' + argv.language + '.epub')

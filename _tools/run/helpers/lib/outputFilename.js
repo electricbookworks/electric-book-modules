@@ -1,3 +1,4 @@
+const languagePathSegment = require('../paths/languagePathSegment.js')
 const variantSettings = require('../settings/variantSettings.js')
 
 // Returns a filename for the output file
@@ -8,7 +9,7 @@ function outputFilename (argv) {
     fileExtension = '.epub'
   }
 
-  if (argv.language) {
+  if (languagePathSegment(argv)) {
     filename = argv.book + '-' + argv.language + '-' + argv.format
   } else {
     filename = argv.book + '-' + argv.format

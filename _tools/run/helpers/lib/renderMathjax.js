@@ -4,6 +4,7 @@ const spawn = require('cross-spawn')
 const logProcess = require('./logProcess.js')
 const mathjaxEnabled = require('./mathjaxEnabled.js')
 const htmlFilePaths = require('../paths/htmlFilePaths.js')
+const languagePathSegment = require('../paths/languagePathSegment.js')
 const pathExists = require('../paths/pathExists.js')
 
 // Processes mathjax in output HTML
@@ -18,13 +19,8 @@ async function renderMathjax (argv, options) {
       // or there is no merged file for some reason.
 
       // Check if a merged.html exists
-      let mergedFilePath = fsPath.normalize(process.cwd() +
-        '/_site/' + argv.book + '/merged.html')
-
-      if (argv.language) {
-        mergedFilePath = fsPath.normalize(process.cwd() +
-        '/_site/' + argv.book + '/' + argv.language + '/merged.html')
-      }
+      const mergedFilePath = fsPath.normalize(process.cwd() +
+        '/_site/' + argv.book + languagePathSegment(argv) + '/merged.html')
 
       const mergedFileExists = pathExists(mergedFilePath)
 

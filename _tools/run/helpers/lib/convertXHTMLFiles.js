@@ -1,5 +1,6 @@
 const spawn = require('cross-spawn')
 const logProcess = require('./logProcess.js')
+const languagePathSegment = require('../paths/languagePathSegment.js')
 
 // Converts .html files to .xhtml, e.g. for epub output
 async function convertXHTMLFiles (argv) {
@@ -7,7 +8,7 @@ async function convertXHTMLFiles (argv) {
 
   try {
     let convertXHTMLFilesProcess
-    if (argv.language) {
+    if (languagePathSegment(argv)) {
       convertXHTMLFilesProcess = spawn(
         'gulp',
         ['epubXhtmlFiles',
