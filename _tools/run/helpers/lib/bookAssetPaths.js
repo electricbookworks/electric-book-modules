@@ -1,5 +1,6 @@
 const fs = require('fs-extra')
 const fsPath = require('path')
+const languagePathSegment = require('../paths/languagePathSegment.js')
 const variantSettings = require('../settings/variantSettings.js')
 
 // Get array of book-asset file paths for this output.
@@ -27,10 +28,14 @@ function bookAssetPaths (argv, assetType, folder, options) {
     formatSubdirectory = argv.format
   }
 
+  // A real translation lives in a language subfolder; the parent
+  // (default) language lives at the book root, so its segment is empty.
+  const languageSegment = languagePathSegment(argv)
+
   const pathToTranslatedAssets = fsPath.normalize(process.cwd() +
         '/_site/' +
-        book + '/' +
-        argv.language + '/' +
+        book +
+        languageSegment + '/' +
         assetType + '/' +
         formatSubdirectory)
 
@@ -45,7 +50,7 @@ function bookAssetPaths (argv, assetType, folder, options) {
   // When options.parentOnly is set, always use the parent assets.
   let pathToAssets
   if (!options.parentOnly &&
-            argv.language &&
+            languageSegment &&
             fs.existsSync(pathToTranslatedAssets) &&
             fs.readdirSync(pathToTranslatedAssets).length > 0) {
     pathToAssets = pathToTranslatedAssets

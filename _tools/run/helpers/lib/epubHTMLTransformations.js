@@ -1,5 +1,6 @@
 const spawn = require('cross-spawn')
 const logProcess = require('./logProcess.js')
+const languagePathSegment = require('../paths/languagePathSegment.js')
 
 // Run HTML transformations on elements in epubs
 async function epubHTMLTransformations (argv) {
@@ -7,7 +8,7 @@ async function epubHTMLTransformations (argv) {
 
   try {
     let epubHTMLTransformationsProcess
-    if (argv.language) {
+    if (languagePathSegment(argv)) {
       epubHTMLTransformationsProcess = spawn(
         'gulp',
         ['runEpubTransformations',

@@ -2,6 +2,7 @@ const fs = require('fs-extra')
 const fsPath = require('path')
 const pandoc = require('node-pandoc')
 const htmlFilePaths = require('../paths/htmlFilePaths.js')
+const languagePathSegment = require('../paths/languagePathSegment.js')
 const pathExists = require('../paths/pathExists.js')
 
 // Convert HTML files to another format
@@ -17,13 +18,8 @@ async function convertHTMLtoWord (argv) {
   // use the merged file.
   if (argv.merged) {
     // Check if a merged.html exists
-    let mergedFilePath = fsPath.normalize(process.cwd() +
-      '/_site/' + argv.book + '/merged.html')
-
-    if (argv.language) {
-      mergedFilePath = fsPath.normalize(process.cwd() +
-      '/_site/' + argv.book + '/' + argv.language + '/merged.html')
-    }
+    const mergedFilePath = fsPath.normalize(process.cwd() +
+      '/_site/' + argv.book + languagePathSegment(argv) + '/merged.html')
 
     const mergedFileExists = pathExists(mergedFilePath)
 

@@ -1,6 +1,7 @@
 const fs = require('fs-extra')
 const fsPath = require('path')
 const pathExists = require('../paths/pathExists.js')
+const languagePathSegment = require('../paths/languagePathSegment.js')
 
 // Move epub.zip to _output
 async function epubZipRename (argv) {
@@ -9,7 +10,7 @@ async function epubZipRename (argv) {
               '/_site/epub.zip')
 
     let epubFilename = argv.book + '.epub'
-    if (argv.language) {
+    if (languagePathSegment(argv)) {
       epubFilename = argv.book + '-' +
         argv.language +
         '.epub'

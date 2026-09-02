@@ -4,6 +4,7 @@ const prince = require('prince')
 const checkPrinceVersion = require('./checkPrinceVersion.js')
 const outputFilename = require('./outputFilename.js')
 const htmlFilePaths = require('../paths/htmlFilePaths.js')
+const languagePathSegment = require('../paths/languagePathSegment.js')
 const variantSettings = require('../settings/variantSettings.js')
 
 // Run Prince
@@ -33,11 +34,7 @@ async function runPrince (argv) {
     // input files, we only pass the merged file to Prince.
     // Unless `--merged false` was passed at the command line.
     let inputFiles = fsPath.normalize(process.cwd() +
-      '/_site/' + argv.book + '/merged.html')
-    if (argv.language) {
-      inputFiles = fsPath.normalize(process.cwd() +
-      '/_site/' + argv.book + '/' + argv.language + '/merged.html')
-    }
+      '/_site/' + argv.book + languagePathSegment(argv) + '/merged.html')
 
     if (argv.merged === false) {
       inputFiles = htmlFilePaths(argv)
@@ -61,14 +58,9 @@ async function runPrince (argv) {
     // Apply the stylesheet with that name
     // that we find in the styles folder beside
     // the first HTML document we're rendering.
-    let stylesheet = fsPath.normalize(process.cwd() +
-      '/_site/' + argv.book +
+    const stylesheet = fsPath.normalize(process.cwd() +
+      '/_site/' + argv.book + languagePathSegment(argv) +
       '/styles/' + styleSheetFilename)
-    if (argv.language) {
-      stylesheet = fsPath.normalize(process.cwd() +
-      '/_site/' + argv.book + '/' + argv.language + '/' +
-      '/styles/' + styleSheetFilename)
-    }
 
     // Currently, node-prince does not seem to
     // log its progress to stdout. Possible WIP:

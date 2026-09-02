@@ -1,5 +1,6 @@
 const spawn = require('cross-spawn')
 const logProcess = require('./logProcess.js')
+const languagePathSegment = require('../paths/languagePathSegment.js')
 
 // Cleans out old .html files after .xhtml conversions
 async function cleanHTMLFiles (argv) {
@@ -7,7 +8,7 @@ async function cleanHTMLFiles (argv) {
 
   try {
     let cleanHTMLFilesProcess
-    if (argv.language) {
+    if (languagePathSegment(argv)) {
       cleanHTMLFilesProcess = spawn(
         'gulp',
         ['epubCleanHtmlFiles',

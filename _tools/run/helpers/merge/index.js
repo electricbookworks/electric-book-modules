@@ -9,6 +9,7 @@ const fsPromises = require('fs/promises')
 
 // Local helpers
 const htmlFilePaths = require('../paths/htmlFilePaths.js')
+const languagePathSegment = require('../paths/languagePathSegment.js')
 
 // HTML5 ignores the self-closing slash on non-void elements such as
 // `<script src="..."/>` or `<iframe .../>`. When the HTML parser meets
@@ -147,14 +148,19 @@ async function merge (argv) {
   console.log('Merging HTML files ...')
   const filePaths = await htmlFilePaths(argv)
 
-  let destination
-  if (argv.language) {
-    destination = fsPath.normalize(process.cwd() +
-      '/_site/' + argv.book + '/' + argv.language + '/merged.html')
-  } else {
-    destination = fsPath.normalize(process.cwd() +
-      '/_site/' + argv.book + '/merged.html')
+  // If we found no files to merge, there is nothing to serialize.
+  // Fail with a clear message rather than crashing later on an
+  // undefined merged DOM. This typically means the requested book
+  // or language produced no output (e.g. a language subfolder that
+  // doesn't exist because the language is the book's default).
+  if (!filePaths || filePaths.length === 0) {
+    throw new Error('No HTML files found to merge for book "' + argv.book +
+      '"' + (argv.language ? ' (language "' + argv.language + '")' : '') +
+      '. Nothing was written to a merged file.')
   }
+
+  const destination = fsPath.normalize(process.cwd() +
+    '/_site/' + argv.book + languagePathSegment(argv) + '/merged.html')
 
   let mergedDom
 

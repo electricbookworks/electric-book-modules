@@ -1,5 +1,6 @@
 const spawn = require('cross-spawn')
 const logProcess = require('./logProcess.js')
+const languagePathSegment = require('../paths/languagePathSegment.js')
 
 // Run HTML transformations on elements in pdf
 async function pdfHTMLTransformations (argv) {
@@ -7,7 +8,7 @@ async function pdfHTMLTransformations (argv) {
 
   try {
     let pdfHTMLTransformationsProcess
-    if (argv.language) {
+    if (languagePathSegment(argv)) {
       pdfHTMLTransformationsProcess = spawn(
         'gulp',
         ['runPDFTransformations',

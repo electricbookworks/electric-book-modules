@@ -7,6 +7,7 @@ const yaml = require('js-yaml') // reads YAML files into JS objects
 const pathExists = require('./pathExists.js')
 const variantSettings = require('../settings/variantSettings.js')
 const projectSettings = require('../settings/projectSettings.js')
+const languagePathSegment = require('./languagePathSegment.js')
 
 // Get the filelist for a format,
 // with option to get file-list for a specific book.
@@ -37,6 +38,14 @@ function fileList (argv, book, language) {
     book = argv.book
   } else if (!book) {
     book = 'book' // default
+  }
+
+  // If the requested language is the book's parent (default) language,
+  // its files are the default files at the book root, not a translation.
+  // Treat it as no language so we load the default files list below,
+  // rather than looking for a non-existent translation folder.
+  if (language && languagePathSegment({ book, language }) === '') {
+    language = undefined
   }
 
   // Build path to YAML data for this book

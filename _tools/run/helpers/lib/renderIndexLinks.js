@@ -1,6 +1,7 @@
 const spawn = require('cross-spawn')
 const logProcess = require('./logProcess.js')
 const projectSettings = require('./projectSettings.js')
+const languagePathSegment = require('../paths/languagePathSegment.js')
 
 // Processes index-list items as linked references in output HTML
 async function renderIndexLinks (argv) {
@@ -9,7 +10,7 @@ async function renderIndexLinks (argv) {
 
     try {
       let indexLinksProcess
-      if (argv.language) {
+      if (languagePathSegment(argv)) {
         indexLinksProcess = spawn(
           'gulp',
           ['renderIndexListReferences',

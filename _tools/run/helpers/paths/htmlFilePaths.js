@@ -5,9 +5,12 @@ const fsPath = require('path')
 const fileList = require('./fileList.js')
 const works = require('./works.js')
 const translations = require('./translations.js')
+const languagePathSegment = require('./languagePathSegment.js')
 
-// Build out file paths from filename and work
-function buildPaths (filenames, extension, work, language) {
+// Build out file paths from filename and work.
+// languageSegment is a path segment such as '/es' for a translation,
+// or an empty string for parent-language content at the book root.
+function buildPaths (filenames, extension, work, languageSegment) {
   if (!extension) {
     extension = '.html'
   }
@@ -17,18 +20,10 @@ function buildPaths (filenames, extension, work, language) {
     work = 'book'
   }
 
-  let pathToFiles
-  if (language) {
-    pathToFiles = process.cwd() + '/' +
-                '_site/' +
-                work + '/' +
-                language
-  } else {
-    pathToFiles = process.cwd() + '/' +
-                '_site/' +
-                work
-  }
-  pathToFiles = fsPath.normalize(pathToFiles)
+  const pathToFiles = fsPath.normalize(process.cwd() + '/' +
+              '_site/' +
+              work +
+              (languageSegment || ''))
 
   // Extract filenames from file objects,
   // and prepend path to each filename.
@@ -70,7 +65,7 @@ async function htmlFilePaths (argv, extension, options) {
       if (languages.length > 0) {
         languages.forEach(function (language) {
           const languageFiles = fileList(argv, work, language)
-          const languagePaths = buildPaths(languageFiles, extension, work, language)
+          const languagePaths = buildPaths(languageFiles, extension, work, '/' + language)
 
           // Add its paths to the paths array
           languagePaths.forEach(function (languagePath) {
@@ -81,7 +76,7 @@ async function htmlFilePaths (argv, extension, options) {
     })
   } else {
     const files = fileList(argv)
-    paths = buildPaths(files, extension, argv.book, argv.language)
+    paths = buildPaths(files, extension, argv.book, languagePathSegment(argv))
   }
 
   return paths
