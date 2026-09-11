@@ -5,8 +5,9 @@
 // (default electricbookworks/electric-book-canonicals). One release per
 // project, identified by a tag (settings.canonical-release in _data/tests.yml).
 //
-//   - Downloading uses the GitHub REST API with $GITHUB_TOKEN, so it works for
-//     private repos in Codespaces and CI. No gh CLI is needed to download.
+//   - Downloading uses the GitHub REST API with a token (GH_TOKEN, or the
+//     ambient GITHUB_TOKEN), so it works for private repos in Codespaces and
+//     CI. No gh CLI is needed to download.
 //   - Uploading (via `--update`) uses the gh CLI (`gh release upload --clobber`),
 //     which is available in Codespaces and CI and handles auth and large files.
 
@@ -19,9 +20,12 @@ const { execFileSync, spawnSync } = require('child_process')
 // and let the rest of the test suite continue.
 class NoAccessError extends Error {}
 
-// The GitHub token available in Codespaces and CI, if any.
+// The GitHub token available in Codespaces and CI, if any. GH_TOKEN takes
+// precedence over GITHUB_TOKEN (matching the gh CLI) so a user can override
+// the ambient Codespace token — which is scoped to this repo and can't reach
+// the canonicals repo — by exporting GH_TOKEN.
 function githubToken () {
-  return process.env.GITHUB_TOKEN || process.env.GH_TOKEN || null
+  return process.env.GH_TOKEN || process.env.GITHUB_TOKEN || null
 }
 
 // Split "owner/repo" into parts, or return null if malformed.
