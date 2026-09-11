@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [3.2.0](https://github.com/electricbookworks/electric-book-modules/compare/v3.1.1...v3.2.0) (2026-09-11)
+
+
+### Bug Fixes
+
+* prefer `GH_TOKEN` over `GITHUB_TOKEN` for canonical downloads ([83dafb8](https://github.com/electricbookworks/electric-book-modules/commit/83dafb81c209815c466fb4f2b031ca454752a684))
+
 ### [3.1.1](https://github.com/electricbookworks/electric-book-modules/compare/v3.1.0...v3.1.1) (2026-09-02)
 
 ## [3.1.0](https://github.com/electricbookworks/electric-book-modules/compare/v3.0.1...v3.1.0) (2026-08-20)
