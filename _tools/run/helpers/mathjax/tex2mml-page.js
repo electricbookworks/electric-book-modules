@@ -58,6 +58,87 @@ const htmlfile = require('fs').readFileSync(argv._[0], 'utf8')
 // Get the path for the output file
 const outputFilePath = argv._[1]
 
+// MathJax is configured with the default TeX delimiters: \(...\) for inline
+// math, and $$...$$ or \[...\] for display math (see the book template's
+// assets/js/mathjax/extensions/tex2jax.js). A wrapper containing none of these
+// opening delimiters has no math to convert, so it is copied through untouched.
+function hasMath (html) {
+  return /\\\(|\\\[|\$\$/.test(html)
+}
+
+// Split the merged HTML into a prefix (everything up to and including the
+// opening <body> tag), an array of body segments, and a suffix (the closing
+// </body> onwards). Each top-level `<div class="wrapper …">` becomes one
+// `wrapper` segment; everything else (whitespace, scripts) is a `passthrough`
+// segment preserved verbatim. Each source file contributes exactly one
+// top-level wrapper, and equations never span wrapper boundaries, so
+// converting each wrapper independently is safe.
+function splitDocument (html) {
+  const bodyOpen = html.match(/<body\b[^>]*>/i)
+  const bodyCloseIndex = html.lastIndexOf('</body>')
+  if (!bodyOpen || bodyCloseIndex === -1) {
+    return null
+  }
+
+  const prefixEnd = bodyOpen.index + bodyOpen[0].length
+  const prefix = html.slice(0, prefixEnd)
+  const body = html.slice(prefixEnd, bodyCloseIndex)
+  const suffix = html.slice(bodyCloseIndex)
+
+  const segments = []
+  let hasWrapper = false
+  let depth = 0
+  let wrapperStart = -1
+  let lastIndex = 0
+
+  // Match comments and <script> blocks so any `<div>` text inside them is
+  // consumed as a single token and never miscounted; otherwise match div
+  // open/close tags to track nesting depth.
+  const tokenRe =
+    /<!--[\s\S]*?-->|<script\b[^>]*>[\s\S]*?<\/script>|<\/?div\b[^>]*>/gi
+  let match
+  while ((match = tokenRe.exec(body)) !== null) {
+    const token = match[0]
+    if (token[1] !== '/' && token.slice(0, 4).toLowerCase() !== '<div') {
+      // Comment or script block: skip without affecting depth.
+      continue
+    }
+
+    const isCloseDiv = token[1] === '/'
+    if (!isCloseDiv) {
+      if (depth === 0 &&
+          /class\s*=\s*(["'])\s*wrapper(?:\s|\1)/i.test(token)) {
+        if (match.index > lastIndex) {
+          segments.push({
+            type: 'passthrough',
+            text: body.slice(lastIndex, match.index)
+          })
+        }
+        wrapperStart = match.index
+        lastIndex = match.index
+        hasWrapper = true
+      }
+      depth += 1
+    } else {
+      if (depth > 0) {
+        depth -= 1
+      }
+      if (depth === 0 && wrapperStart !== -1) {
+        const end = match.index + token.length
+        segments.push({ type: 'wrapper', text: body.slice(wrapperStart, end) })
+        wrapperStart = -1
+        lastIndex = end
+      }
+    }
+  }
+
+  if (lastIndex < body.length) {
+    segments.push({ type: 'passthrough', text: body.slice(lastIndex) })
+  }
+
+  return { prefix, segments, suffix, hasWrapper }
+}
+
 //  A renderAction to take the place of typesetting.
 //  It renders the output to MathML instead.
 function renderMathML (math, doc) {
@@ -87,8 +168,11 @@ global.MathJax = {
     fontSize: argv.em
   },
   startup: {
-    typeset: true,
-    document: htmlfile,
+    // Don't typeset on startup, and parse only a trivial placeholder document
+    // here. The real conversion happens below, one page wrapper at a time, so
+    // MathJax/liteDOM never parses the whole merged book in a single pass.
+    typeset: false,
+    document: '<!DOCTYPE html><html><head></head><body></body></html>',
     ready () {
       // In source (non-dist) mode, liteDOM lazily async-loads named-entity
       // tables from '[mathjax]/util/entities/*.js'. The loader resolves
@@ -103,22 +187,62 @@ global.MathJax = {
   }
 }
 
-//  Load the MathJax startup module
-require('@mathjax/src/' + (argv.dist ? 'bundle' : 'components/js') + '/startup/startup.js')
+//  Load the MathJax startup module. The webpacked bundle exposes startup.js at
+//  the bundle root; only the source tree nests it under startup/startup.js.
+require(argv.dist
+  ? '@mathjax/src/bundle/startup.js'
+  : '@mathjax/src/components/js/startup/startup.js')
 
 //  Wait for MathJax to start up, and then render the math.
 //  Then output the resulting HTML file.
 global.MathJax.startup.promise.then(() => {
-  const adaptor = global.MathJax.startup.adaptor
-  const html = global.MathJax.startup.document
-  html.render()
+  const startup = global.MathJax.startup
+  const adaptor = startup.adaptor
 
-  // Log the convert doc to the console
-  // console.log(adaptor.doctype(html.document))
-  // console.log(adaptor.outerHTML(adaptor.root(html.document)))
+  // Convert a single HTML fragment (one page wrapper) by typesetting it in
+  // its own small liteDOM document. Keeping every parse small avoids the
+  // super-linear slowdown that hits when the whole merged book is parsed at
+  // once. MathJax itself is loaded only once, up front.
+  function convertFragment (fragment) {
+    const doc = startup.getDocument(
+      '<!DOCTYPE html><html><head></head><body>' + fragment + '</body></html>'
+    )
+    // renderMathML reads startup.document (via toMML), so point it at the
+    // document we are about to render.
+    startup.document = doc
+    doc.render()
+    return adaptor.innerHTML(adaptor.body(doc.document))
+  }
+
+  // Convert an entire HTML document in one pass. Used as a fallback when the
+  // document can't be split into page wrappers (preserves the original
+  // whole-document behaviour).
+  function convertWholeDocument (documentHtml) {
+    const doc = startup.getDocument(documentHtml)
+    startup.document = doc
+    doc.render()
+    return adaptor.outerHTML(adaptor.root(doc.document))
+  }
 
   // Write the converted HTML file
-  let outputFileContents = adaptor.outerHTML(adaptor.root(html.document))
+  let outputFileContents
+  const split = splitDocument(htmlfile)
+
+  if (!split || !split.hasWrapper) {
+    // No recognisable page wrappers: fall back to whole-document conversion.
+    outputFileContents = convertWholeDocument(htmlfile)
+  } else {
+    let convertedBody = ''
+    for (const segment of split.segments) {
+      if (segment.type === 'wrapper' && hasMath(segment.text)) {
+        convertedBody += convertFragment(segment.text)
+      } else {
+        // Pages with no math (and non-wrapper content) pass through untouched.
+        convertedBody += segment.text
+      }
+    }
+    outputFileContents = split.prefix + convertedBody + split.suffix
+  }
 
   // Prince doesn't compute the default MathML accent attribute
   // from the operator dictionary, causing accents like tildes
