@@ -22,7 +22,7 @@ const headingLevel = /^h[1-6]$/.test(configuredLevel) ? configuredLevel : 'h2'
 //    number, and cap at 6 (the deepest HTML heading level).
 const headingLevelNumber = parseInt(headingLevel.replace('h', ''), 10)
 const subheadingLevel = 'h' + Math.min(headingLevelNumber + 1, 6)
-const accordionHeads = '.content > ' + headingLevel
+export const accordionHeads = '.content > ' + headingLevel
 
 // 2. Which heading's section should we show by default?
 const defaultAccordionHead = '.content > ' + headingLevel + ':first-of-type'

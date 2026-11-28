@@ -1,5 +1,7 @@
+/* global Node */
+
 import SVGInject from '@iconfu/svg-inject'
-import { ebAccordionIsPageOff } from './accordion'
+import { ebAccordionIsPageOff, accordionHeads } from './accordion'
 
 const ebLazyLoadImages = function (lazyImages) {
   if (!Array.prototype.forEach) return
@@ -44,6 +46,19 @@ export default function ebLazyLoad () {
       if (ebAccordionIsPageOff()) {
         const lazyImages = document.querySelectorAll('[data-src]')
         ebLazyLoadImages(lazyImages)
+      } else {
+        // On accordion pages, content before the first accordion heading
+        // is never inside a section, so no section-open will load it.
+        // Load images that come before that heading in document order.
+        const firstAccordionHead = document.querySelector(accordionHeads)
+        const imagesBeforeFirstHead = Array.prototype.filter.call(
+          document.querySelectorAll('[data-src]'),
+          function (image) {
+            return firstAccordionHead.compareDocumentPosition(image) &
+              Node.DOCUMENT_POSITION_PRECEDING
+          }
+        )
+        ebLazyLoadImages(imagesBeforeFirstHead)
       }
     }
     // if there's a chapter-opener-image, lazyload it
